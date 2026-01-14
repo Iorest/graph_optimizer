@@ -1,0 +1,6 @@
+{
+  "input_graph": "graph_optimizer/demos/demo_input.pb",
+  "output_graph": "graph_optimizer/demos/demo_optimized.pb",
+  "log_file": "graph_optimizer/demos/optimization.log",
+  "add_passes": ["concat_constant_folding"]
+}

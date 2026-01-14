@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+*.so
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project Temporary Files
+*.pb
+*.pbtxt
+*.log
+run_*/
+timeline*.json
+debug_graphs/
+.DS_Store
