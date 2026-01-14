@@ -220,7 +220,7 @@ class GraphOptimizer:
         from .utils.logger import logger as local_logger
 
         local_logger.info(
-            f"[{pass_name or 'optimize'}] Final pruning: removing {len(dead_nodes)} dead nodes"
+            f"[{pass_name or 'optimize'}] Final pruning: removing {len(dead_nodes)} dead nodes: {', '.join(dead_nodes)}"
         )
 
         pruned_graph_def = tf.GraphDef()
@@ -817,7 +817,8 @@ class PatternRewritePass(BasePass):
         )
 
         # PERSISTENCE FIX: Update optimizer state for next pass
-        optimizer.graph_def = optimized_graph
+        # Must call load_state() to sync graph_def, nodes, and consumers
+        optimizer.load_state(optimized_graph)
 
         if debug_dir and step is not None:
             import os
