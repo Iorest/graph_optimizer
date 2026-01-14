@@ -43,8 +43,8 @@ class GraphOptimizer:
 
     def add_transformation(self, pattern, rewriter):
         """Adds a transformation rule (pattern -> rewriter)."""
-        # Aspect: Wrap rewriter with execution tracing
-        traced_rewriter = trace_transformation(rewriter)
+        # Note: rewriter may already be wrapped with trace_transformation by PatternRewritePass
+        # Don't wrap it again to avoid duplicate logging
         logging.info(
             f"Adding transformation: rule={rewriter.__name__} pattern={pattern}"
         )
@@ -53,10 +53,10 @@ class GraphOptimizer:
         op_type = pattern.get_indexed_op_type()
         if op_type is None:
             # Wildcard pattern - must check against all nodes
-            self.wildcard_patterns.append((pattern, traced_rewriter))
+            self.wildcard_patterns.append((pattern, rewriter))
         else:
             # Specific op_type - only check against matching nodes
-            self.pattern_index[op_type].append((pattern, traced_rewriter))
+            self.pattern_index[op_type].append((pattern, rewriter))
 
     def clear_transformations(self):
         """Clears all registered transformations."""

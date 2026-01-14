@@ -36,11 +36,13 @@ def trace_transformation(func):
     @functools.wraps(func)
     def wrapper(match, optimizer, *args, **kwargs):
         # We assume the first arg is typically the match object
-        logger.info(f"Executing rewriter: {func.__name__}")
         start_time = time.time()
         result = func(match, optimizer, *args, **kwargs)
         duration = (time.time() - start_time) * 1000
+        
+        # Only log when optimization actually happened (result is not None)
         if result:
+            logger.info(f"Executing rewriter: {func.__name__}")
             logger.info(
                 f"Rewriter {func.__name__} generated {len(result)} nodes ({duration:.2f}ms)"
             )

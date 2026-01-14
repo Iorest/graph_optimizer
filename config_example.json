@@ -1,0 +1,35 @@
+{
+  "input_graph": "path/to/input_graph.pb",
+  "output_graph": "path/to/output_graph.pb",
+  "level": 2,
+  "debug": true,
+  "output_nodes": [
+    "output1",
+    "output2",
+    "final_result"
+  ],
+  "protected_nodes": [
+    "important_intermediate_node"
+  ],
+  "log_file": "optimization.log",
+  "passes": null,
+  "add_passes": [
+    "custom_pass_1"
+  ],
+  "remove_passes": [
+    "unwanted_pass"
+  ],
+  "_comment": "Configuration file for Graph Optimizer",
+  "_description": {
+    "input_graph": "Path to input TensorFlow GraphDef (.pb or .pbtxt)",
+    "output_graph": "Path to save the optimized graph",
+    "level": "Optimization level: 1=Basic, 2=Advanced",
+    "debug": "Enable debug mode to dump intermediate graphs",
+    "output_nodes": "List of output node names (will be protected from pruning)",
+    "protected_nodes": "Additional nodes to protect from pruning (optional)",
+    "log_file": "Path to save optimization logs (optional)",
+    "passes": "Explicit list of passes to run (overrides level, null to use level-based selection)",
+    "add_passes": "Additional passes to append to the default pass list",
+    "remove_passes": "Passes to remove from the default pass list"
+  }
+}
