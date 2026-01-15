@@ -1204,33 +1204,35 @@ class BasePass:
     
     def _create_cse_signature(self, node):
         """
-        为 CSE 创建节点签名，保留控制依赖标记。
+        为 CSE 创建节点签名，保留控制依赖标记和端口号。
         
         与 create_node_signature 的区别：
         - create_node_signature: 去除端口和控制依赖标记，用于一般模式匹配
-        - _create_cse_signature: 保留控制依赖标记，用于 CSE 精确去重
+        - _create_cse_signature: 保留控制依赖标记和端口号，用于 CSE 精确去重
         
         这样可以区分：
         - Add(a, b) 和 Add(a, b, ^ctrl) 是不同的节点
         - Add(a, b, ^ctrl1) 和 Add(a, b, ^ctrl2) 是不同的节点
+        - Add(split:0, split:0) 和 Add(split:0, split:1) 是不同的节点
         
         Args:
             node: tf.NodeDef 节点
             
         Returns:
-            tuple: (op_type, inputs_tuple_with_ctrl_deps, key_attrs)
+            tuple: (op_type, inputs_tuple_with_ctrl_deps_and_ports, key_attrs)
         """
-        # 对于每个输入，只去除端口后缀，保留控制依赖前缀
+        # 对于每个输入，保留控制依赖前缀和端口后缀
+        # 只有对于没有端口的普通输入，默认为 :0
         cleaned_inputs = []
         for inp in node.input:
-            # 保留控制依赖前缀 ^
-            if inp.startswith('^'):
-                cleaned_inputs.append(inp)  # 保留 ^node
-            elif ':' in inp:
-                base_name = inp.split(':', 1)[0]  # 去除端口
-                cleaned_inputs.append(base_name)
-            else:
-                cleaned_inputs.append(inp)
+            cleaned_inputs.append(inp)
+            # # 保留控制依赖前缀 ^ （完整保留，包括端口如 ^node:0）
+            # if inp.startswith('^'):
+            #     cleaned_inputs.append(inp)
+            # else:
+            #     # 对于数据输入，保留完整的 node:port 格式
+            #     # 如果没有端口号，TensorFlow 默认是 :0，但为了签名一致性，保持原样
+            #     cleaned_inputs.append(inp)
         
         # 输入保持原始顺序（不排序）
         inputs_tuple = tuple(cleaned_inputs)

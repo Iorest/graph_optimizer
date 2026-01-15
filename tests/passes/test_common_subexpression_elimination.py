@@ -128,12 +128,26 @@ class TestCSE(unittest.TestCase):
         optimizer = GraphOptimizer(graph_def)
         cse_pass = CommonSubexpressionElimination()
         
+        initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should eliminate w2 (1 node)
+        # add_1 and add_2 should both remain (different control deps)
+        self.assertEqual(final_count, initial_count - 1)
         
         # Verify control dependencies are preserved
         add_1_node = optimizer.nodes.get("add_1")
         self.assertIsNotNone(add_1_node)
         self.assertIn("^ctrl_op", add_1_node.input)
+        
+        # Verify add_2 still exists (no control dep, so different from add_1)
+        add_2_node = optimizer.nodes.get("add_2")
+        self.assertIsNotNone(add_2_node)
+        
+        # w2 should be eliminated, w1 should remain
+        self.assertIn("w1", optimizer.nodes)
+        self.assertNotIn("w2", optimizer.nodes)
     
     def test_multi_port_outputs(self):
         """Test 5: CSE should handle multi-port outputs correctly."""
@@ -560,11 +574,20 @@ class TestCSE(unittest.TestCase):
         cse_pass.transform(optimizer, protected_nodes=["weights_2", "add_2"])
         final_count = len(optimizer.nodes)
         
-        # weights_2 and add_2 should NOT be removed (protected)
-        # But weights_1 may be kept as canonical for the Const nodes
-        # And add_1 may be kept as canonical for the Add nodes
+        # Protected nodes should be kept and become canonical
         self.assertIn("weights_2", optimizer.nodes, "Protected node weights_2 should not be removed")
         self.assertIn("add_2", optimizer.nodes, "Protected node add_2 should not be removed")
+        
+        # Non-protected duplicates should be removed
+        # weights_1 should be removed (weights_2 is protected canonical)
+        self.assertNotIn("weights_1", optimizer.nodes, "weights_1 should be removed as weights_2 is protected canonical")
+        
+        # After weights merge, add_1 and add_2 become duplicates with same inputs: ["input", "weights_2"]
+        # add_1 should be removed (add_2 is protected canonical)
+        self.assertNotIn("add_1", optimizer.nodes, "add_1 should be removed as add_2 is protected canonical")
+        
+        # Should remove 2 nodes: weights_1 and add_1
+        self.assertEqual(final_count, initial_count - 2)
     
     def test_protected_nodes_as_canonical(self):
         """Test 22: Protected nodes should be preferred as canonical nodes."""
@@ -579,14 +602,270 @@ class TestCSE(unittest.TestCase):
         optimizer = GraphOptimizer(graph_def)
         cse_pass = CommonSubexpressionElimination()
         
+        initial_count = len(optimizer.nodes)
         # Protect const_b - it should become the canonical node
         cse_pass.transform(optimizer, protected_nodes=["const_b_protected"])
+        final_count = len(optimizer.nodes)
         
         # const_b_protected should remain (it's protected and should be canonical)
         self.assertIn("const_b_protected", optimizer.nodes)
         # const_a and const_c should be removed (redirected to const_b_protected)
         self.assertNotIn("const_a", optimizer.nodes)
         self.assertNotIn("const_c", optimizer.nodes)
+        
+        # Should remove 2 nodes
+        self.assertEqual(final_count, initial_count - 2)
+    
+    def test_multiple_protected_nodes_same_signature(self):
+        """Test 23: When multiple protected nodes have same signature, all are kept but shortest is canonical."""
+        nodes = [
+            self._make_placeholder("input", tf.float32),
+            self._make_const("const_long_protected_name", 1.0, tf.float32),  # Protected but longer name
+            self._make_const("const_p", 1.0, tf.float32),  # Protected, shortest name
+            self._make_const("const_medium_protected", 1.0, tf.float32),  # Protected, medium name
+            self._make_const("const_unprotected", 1.0, tf.float32),  # Not protected
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        # Protect three of the const nodes
+        cse_pass.transform(optimizer, protected_nodes=[
+            "const_long_protected_name", 
+            "const_p",  # Shortest protected name
+            "const_medium_protected"
+        ])
+        
+        # All protected nodes should remain (protected = cannot be deleted)
+        self.assertIn("const_p", optimizer.nodes, "const_p (protected) should be kept")
+        self.assertIn("const_long_protected_name", optimizer.nodes, "const_long_protected_name (protected) should be kept")
+        self.assertIn("const_medium_protected", optimizer.nodes, "const_medium_protected (protected) should be kept")
+        
+        # Only unprotected duplicate should be removed
+        self.assertNotIn("const_unprotected", optimizer.nodes, "const_unprotected (not protected) should be removed")
+    
+    def test_same_control_dependencies_merge(self):
+        """Test 24: Nodes with identical control dependencies should be merged."""
+        nodes = [
+            self._make_placeholder("input", tf.float32),
+            self._make_const("w", 1.0, tf.float32),
+            create_node("NoOp", "ctrl"),
+            # Same op, inputs, AND control deps - should be duplicates
+            create_node("Add", "add_1", inputs=["input", "w", "^ctrl"]),
+            create_node("Add", "add_2", inputs=["input", "w", "^ctrl"]),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # add_2 should be merged into add_1 (identical including control deps)
+        self.assertEqual(final_count, initial_count - 1)
+        self.assertTrue("add_1" in optimizer.nodes or "add_2" in optimizer.nodes)
+        self.assertFalse("add_1" in optimizer.nodes and "add_2" in optimizer.nodes)
+    
+    def test_multiple_control_dependencies(self):
+        """Test 25: Nodes with different numbers of control dependencies should NOT be merged."""
+        nodes = [
+            self._make_placeholder("input", tf.float32),
+            self._make_const("w", 1.0, tf.float32),
+            create_node("NoOp", "ctrl_1"),
+            create_node("NoOp", "ctrl_2"),
+            # One control dep
+            create_node("Add", "add_1", inputs=["input", "w", "^ctrl_1"]),
+            # Two control deps - different signature
+            create_node("Add", "add_2", inputs=["input", "w", "^ctrl_1", "^ctrl_2"]),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should NOT merge (different control dependencies)
+        self.assertEqual(final_count, initial_count)
+        self.assertIn("add_1", optimizer.nodes)
+        self.assertIn("add_2", optimizer.nodes)
+    
+    def test_different_output_ports(self):
+        """Test 26: References to different output ports are different inputs."""
+        nodes = [
+            self._make_placeholder("input", tf.float32),
+            create_node("Split", "split", inputs=["input"], attr={"num_split": attr_value_pb2.AttrValue(i=2)}),
+            create_node("Add", "add_1", inputs=["split:0", "split:0"]),  # Same port twice
+            create_node("Add", "add_2", inputs=["split:0", "split:1"]),  # Different ports
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should NOT merge (different inputs due to different ports)
+        self.assertEqual(final_count, initial_count)
+        self.assertIn("add_1", optimizer.nodes)
+        self.assertIn("add_2", optimizer.nodes)
+    
+    def test_noop_nodes_not_merged(self):
+        """Test 27: NoOp nodes should not be merged (in skip_ops)."""
+        nodes = [
+            create_node("NoOp", "noop_1"),
+            create_node("NoOp", "noop_2"),  # "Identical" but should be skipped
+            create_node("NoOp", "noop_3"),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should NOT eliminate any NoOp nodes
+        self.assertEqual(final_count, initial_count)
+        self.assertIn("noop_1", optimizer.nodes)
+        self.assertIn("noop_2", optimizer.nodes)
+        self.assertIn("noop_3", optimizer.nodes)
+    
+    def test_assert_nodes_not_merged(self):
+        """Test 28: Assert nodes should not be merged (in skip_ops)."""
+        nodes = [
+            self._make_placeholder("condition", tf.bool),
+            self._make_placeholder("data", tf.float32),
+            # Assert nodes with same inputs but should not merge (side effects)
+            create_node("Assert", "assert_1", inputs=["condition", "data"]),
+            create_node("Assert", "assert_2", inputs=["condition", "data"]),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should NOT eliminate Assert nodes (side effects matter)
+        self.assertEqual(final_count, initial_count)
+        self.assertIn("assert_1", optimizer.nodes)
+        self.assertIn("assert_2", optimizer.nodes)
+    
+    def test_protected_nodes_empty_list(self):
+        """Test 29: Empty protected_nodes list should work same as None."""
+        nodes = [
+            self._make_placeholder("input", tf.float32),
+            self._make_const("const_1", 1.0, tf.float32),
+            self._make_const("const_2", 1.0, tf.float32),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        # Empty list should behave same as None
+        cse_pass.transform(optimizer, protected_nodes=[])
+        final_count = len(optimizer.nodes)
+        
+        # Should merge const_2 into const_1
+        self.assertEqual(final_count, initial_count - 1)
+    
+    def test_deep_iterative_convergence(self):
+        """Test 30: CSE should handle deep cascading elimination (4 levels)."""
+        nodes = [
+            self._make_placeholder("x", tf.float32),
+            # Level 0: Duplicate constants
+            self._make_const("c1", 1.0, tf.float32),
+            self._make_const("c2", 1.0, tf.float32),
+            # Level 1: Operations on constants
+            create_node("Add", "l1_a", inputs=["x", "c1"]),
+            create_node("Add", "l1_b", inputs=["x", "c2"]),  # Will become duplicate
+            # Level 2: Operations on level 1
+            create_node("Mul", "l2_a", inputs=["l1_a", "c1"]),
+            create_node("Mul", "l2_b", inputs=["l1_b", "c2"]),  # Will become duplicate
+            # Level 3: Operations on level 2
+            create_node("Sub", "l3_a", inputs=["l2_a", "x"]),
+            create_node("Sub", "l3_b", inputs=["l2_b", "x"]),  # Will become duplicate
+            # Level 4: Operations on level 3
+            create_node("Relu", "l4_a", inputs=["l3_a"]),
+            create_node("Relu", "l4_b", inputs=["l3_b"]),  # Will become duplicate
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should eliminate: c2, l1_b, l2_b, l3_b, l4_b = 5 nodes
+        expected_removed = 5
+        self.assertEqual(final_count, initial_count - expected_removed)
+        
+        # Verify all "b" variants are removed
+        self.assertNotIn("c2", optimizer.nodes)
+        self.assertNotIn("l1_b", optimizer.nodes)
+        self.assertNotIn("l2_b", optimizer.nodes)
+        self.assertNotIn("l3_b", optimizer.nodes)
+        self.assertNotIn("l4_b", optimizer.nodes)
+    
+    def test_many_duplicates(self):
+        """Test 31: Handle graph with many duplicate nodes efficiently."""
+        # Create 50 duplicate const nodes
+        nodes = [self._make_placeholder("input", tf.float32)]
+        
+        for i in range(50):
+            nodes.append(self._make_const(f"const_{i}", 3.14, tf.float32))
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        import time
+        start = time.time()
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        duration = time.time() - start
+        
+        # Should merge 49 duplicates into 1, keeping only 2 nodes (input + 1 const)
+        self.assertEqual(final_count, 2)
+        self.assertLess(duration, 5.0, "CSE should complete in reasonable time (<5s)")
+    
+    def test_const_different_values_same_dtype(self):
+        """Test 32: Const nodes with different values should NOT be merged."""
+        nodes = [
+            self._make_const("const_1", 1.0, tf.float32),
+            self._make_const("const_2", 2.0, tf.float32),  # Different value
+            self._make_const("const_3", 3.14, tf.float32),  # Different value
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should NOT merge any (all different values)
+        self.assertEqual(final_count, initial_count)
+        self.assertIn("const_1", optimizer.nodes)
+        self.assertIn("const_2", optimizer.nodes)
+        self.assertIn("const_3", optimizer.nodes)
 
 
 if __name__ == "__main__":
