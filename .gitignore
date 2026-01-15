@@ -10,6 +10,7 @@ venv/
 # IDEs
 .vscode/
 .idea/
+.codebuddy/
 *.swp
 *.swo
 
@@ -21,3 +22,4 @@ run_*/
 timeline*.json
 debug_graphs/
 .DS_Store
+

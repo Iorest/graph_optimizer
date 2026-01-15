@@ -1,5 +1,6 @@
 from .core import (
     GraphOptimizer,
+    RewriteResult,
     OpPattern,
     WildcardPattern,
     VariadicPattern,
@@ -26,6 +27,7 @@ from . import optimizers
 
 __all__ = [
     "GraphOptimizer",
+    "RewriteResult",
     "OpPattern",
     "WildcardPattern",
     "VariadicPattern",

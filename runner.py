@@ -14,8 +14,9 @@ class OptimizationPipeline:
 
     def __init__(
         self,
-        input_graph: str,
+        input_graph: Optional[str] = None,
         output_graph: Optional[str] = None,
+        graph_def=None,
         level: int = 1,
         debug: bool = False,
         passes: Optional[List[str]] = None,
@@ -25,13 +26,16 @@ class OptimizationPipeline:
         config: Optional[Dict[str, Any]] = None,
         protected_nodes: Optional[Iterable[str]] = None,
         output_nodes: Optional[Iterable[str]] = None,
+        run_cleanup_between_passes: bool = False,
+        cleanup_passes: Optional[List[str]] = None,
     ):
         """
         Initialize the pipeline.
 
         Args:
-            input_graph (str): Path to input graph PB file.
-            output_graph (str): Path to save optimized graph.
+            input_graph (str, optional): Path to input graph PB file.
+            output_graph (str, optional): Path to save optimized graph.
+            graph_def (GraphDef, optional): Input graph_def object (takes priority over input_graph).
             level (int): Optimization level (1 or 2). Default 1.
             debug (bool): Enable debug mode (dump intermediate files). Default False.
             passes (list[str]): Explicit list of passes to run (overrides level).
@@ -40,8 +44,19 @@ class OptimizationPipeline:
             log_file (str): Path to log file.
             config (dict): Optional dictionary containing configuration overrides.
                            Keys match constructor args.
+            protected_nodes (Iterable[str], optional): Nodes to protect from pruning.
+            output_nodes (Iterable[str], optional): Output nodes (automatically protected).
+            run_cleanup_between_passes (bool): If True, run cleanup passes (CSE, constant folding, etc.) 
+                                                between each main optimization pass. Default False.
+            cleanup_passes (list[str], optional): List of cleanup pass names to run between main passes.
+                                                   Default: ['common_subexpression_elimination']
+            
+        Note:
+            If both graph_def and input_graph are provided, graph_def takes priority.
+            At least one of graph_def or input_graph must be provided.
         """
         self.input_graph = input_graph
+        self.graph_def = graph_def
         self.output_graph = output_graph
         self.level = level
         self.debug = debug
@@ -51,6 +66,9 @@ class OptimizationPipeline:
         self.log_file = log_file
         self.output_nodes = output_nodes or []
         self.protected_nodes = list(protected_nodes or [])
+        self.run_cleanup_between_passes = run_cleanup_between_passes
+        self.cleanup_passes = cleanup_passes or ['common_subexpression_elimination'] 
+        
         # Automatically protect output nodes from pruning
         for node_name in self.output_nodes:
             if node_name not in self.protected_nodes:
@@ -89,6 +107,10 @@ class OptimizationPipeline:
             for node_name in new_outputs:
                 if node_name not in self.protected_nodes:
                     self.protected_nodes.append(node_name)
+        if "run_cleanup_between_passes" in config:
+            self.run_cleanup_between_passes = config["run_cleanup_between_passes"]
+        if "cleanup_passes" in config:
+            self.cleanup_passes = config["cleanup_passes"]
 
     def _setup_logging_and_debug(self):
         """Configures logging and creates debug directory."""
@@ -153,21 +175,78 @@ class OptimizationPipeline:
         if meta and "priority" in meta:
             return (meta["priority"], name)
         return (100, name)  # Default priority
+    
+    def _run_cleanup_passes(self, optimizer, step_num):
+        """
+        Run cleanup passes (CSE, constant folding, etc.) after a main optimization pass.
+        
+        Args:
+            optimizer: GraphOptimizer instance
+            step_num: Current step number (for debug output)
+        """
+        if not self.cleanup_passes:
+            return
+        
+        for cleanup_pass_name in self.cleanup_passes:
+            if cleanup_pass_name not in PassRegistry._registered_passes:
+                custom_logger.warning(
+                    f"Cleanup pass '{cleanup_pass_name}' not found in registry. Skipping."
+                )
+                continue
+            
+            try:
+                cleanup_instance = PassRegistry.get_pass(cleanup_pass_name)
+                custom_logger.info(
+                    f"Running cleanup pass '{cleanup_pass_name}' after step {step_num}..."
+                )
+                
+                # Clear transformations before cleanup pass
+                optimizer.clear_transformations()
+                
+                # Run cleanup pass (save as substep if debug enabled)
+                if self.debug_dir:
+                    debug_filename = f"{step_num:02d}_{cleanup_pass_name}_cleanup.pb"
+                    cleanup_debug_path = os.path.join(self.debug_dir, debug_filename)
+                else:
+                    cleanup_debug_path = None
+                
+                cleanup_instance.transform(
+                    optimizer,
+                    step=f"{step_num}_cleanup",
+                    debug_dir=None,  # Don't let cleanup pass save its own debug files
+                    protected_nodes=self.protected_nodes,
+                )
+                
+                # Save cleanup result if debug is on
+                if cleanup_debug_path:
+                    save_graph(optimizer.graph_def, cleanup_debug_path)
+                    
+            except Exception as e:
+                import traceback
+                custom_logger.warning(
+                    f"Error in cleanup pass '{cleanup_pass_name}': {e}"
+                )
+                custom_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
+                # Don't rollback for cleanup passes, just continue
 
     def run(self):
         """Executes the optimization pipeline."""
         self._setup_logging_and_debug()
         self._resolve_passes()
 
-        if not self.input_graph:
-            raise ValueError("Input graph path is not specified.")
-
-        custom_logger.info(f"Loading graph from {self.input_graph}")
-        try:
-            graph_def = load_graph(self.input_graph)
-        except Exception as e:
-            custom_logger.error(f"Failed to load graph: {e}")
-            raise
+        # Priority: graph_def > input_graph
+        if self.graph_def is not None:
+            custom_logger.info("Using provided graph_def object")
+            graph_def = self.graph_def
+        elif self.input_graph:
+            custom_logger.info(f"Loading graph from {self.input_graph}")
+            try:
+                graph_def = load_graph(self.input_graph)
+            except Exception as e:
+                custom_logger.error(f"Failed to load graph: {e}")
+                raise
+        else:
+            raise ValueError("Either graph_def or input_graph must be provided.")
 
         custom_logger.info("Initializing optimizer...")
         optimizer = GraphOptimizer(graph_def)
@@ -178,6 +257,10 @@ class OptimizationPipeline:
             )
 
         custom_logger.info(f"Applying passes: {self.resolved_passes}")
+        
+        if self.run_cleanup_between_passes:
+            custom_logger.info(f"Cleanup passes will run between main passes: {self.cleanup_passes}")
+        
         for i, pass_name in enumerate(self.resolved_passes):
             if pass_name in PassRegistry._registered_passes:
                 try:
@@ -199,8 +282,15 @@ class OptimizationPipeline:
                         debug_dir=self.debug_dir,
                         protected_nodes=self.protected_nodes,
                     )
+                    
+                    # Run cleanup passes after each main pass (if enabled)
+                    if self.run_cleanup_between_passes:
+                        self._run_cleanup_passes(optimizer, i + 1)
+                    
                 except Exception as e:
+                    import traceback
                     custom_logger.error(f"Error applying pass '{pass_name}': {e}")
+                    custom_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
                     custom_logger.warning(
                         f"Rolling back graph state before pass '{pass_name}'..."
                     )

@@ -3,9 +3,14 @@ from ..utils import create_node
 from ..utils.logger import logger as logging
 
 
-@PassRegistry.register("concat_fusion", opt_level=2, priority=20)
+@PassRegistry.register("concat_fusion", opt_level=3, priority=20)
 class ConcatFusionPass(PatternRewritePass):
-    """Fuses multi-level ConcatV2 operations with the same axis."""
+    """
+    Fuses multi-level ConcatV2 operations with the same axis.
+    
+    Transform: ConcatV2([..., ConcatV2([a, b], axis), ...], axis)
+    Into: ConcatV2([..., a, b, ...], axis)
+    """
 
     def __init__(self):
         pattern = Op(
@@ -14,7 +19,12 @@ class ConcatFusionPass(PatternRewritePass):
             Op("Const", alias="axis"),
             alias="root",
         )
-        super().__init__(pattern, self._fuse_concat, name="ConcatFusion")
+        super().__init__(
+            pattern, 
+            self._fuse_concat, 
+            name="ConcatFusion",
+            optimizer_alias="concat_fuse"
+        )
 
     def _fuse_concat(self, match, optimizer):
         root = match.matched_nodes["root"]
@@ -32,7 +42,7 @@ class ConcatFusionPass(PatternRewritePass):
         changed = False
 
         for input_name in root.input[:-1]:
-            base_name = input_name.split(":")[0].lstrip("^")
+            base_name = self.clean_input_name(input_name)
             if base_name in optimizer.nodes:
                 input_node = optimizer.nodes[base_name]
                 if input_node.op == "ConcatV2":
@@ -41,7 +51,7 @@ class ConcatFusionPass(PatternRewritePass):
                         new_inputs.append(input_name)
                         continue
 
-                    inner_axis_name = input_node.input[-1].split(":")[0].lstrip("^")
+                    inner_axis_name = self.clean_input_name(input_node.input[-1])
                     inner_axis_node = optimizer.nodes.get(inner_axis_name)
                     if inner_axis_node and inner_axis_node.op == "Const":
                         inner_rank = optimizer.get_node_rank(input_node)

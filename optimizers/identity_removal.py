@@ -4,7 +4,12 @@ from ..utils import create_node
 
 @PassRegistry.register("identity_removal", opt_level=1, priority=10)
 class IdentityRemovalPass(PatternRewritePass):
-    """Pass to remove redundant Identity nodes."""
+    """
+    Remove redundant Identity nodes.
+    
+    Transform: Identity(Identity(x))
+    Into: Identity(x)
+    """
 
     def __init__(self):
         pattern = Op(
@@ -12,7 +17,12 @@ class IdentityRemovalPass(PatternRewritePass):
             Op("Identity", Any(alias="x"), alias="inner"),
             alias="root",
         )
-        super().__init__(pattern, self._remove_identity, name="IdentityRemoval")
+        super().__init__(
+            pattern, 
+            self._remove_identity, 
+            name="IdentityRemoval",
+            optimizer_alias="identity_rm"
+        )
 
     def _remove_identity(self, match, optimizer):
         root = match.matched_nodes["root"]

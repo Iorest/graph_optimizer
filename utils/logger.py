@@ -43,8 +43,10 @@ def trace_transformation(func):
         # Only log when optimization actually happened (result is not None)
         if result:
             logger.info(f"Executing rewriter: {func.__name__}")
+            # Handle both list format and RewriteResult format
+            node_count = len(result.new_nodes) if hasattr(result, 'new_nodes') else len(result)
             logger.info(
-                f"Rewriter {func.__name__} generated {len(result)} nodes ({duration:.2f}ms)"
+                f"Rewriter {func.__name__} generated {node_count} nodes ({duration:.2f}ms)"
             )
         else:
             logger.debug(f"Rewriter {func.__name__} returned None")

@@ -10,6 +10,8 @@ Graph Optimizer 是一个基于模式匹配的 TensorFlow `GraphDef` 离线优�
 - **自动资源管理**：
   - **死节点清理**：自动移除优化后产生的孤立节点。
   - **依赖保持**：在图重写过程中，自动保持并转移原有的控制依赖（Control Dependencies）。
+  - **公共子表达式消除（CSE）**：消除具有相同操作、输入和属性的重复节点（包括值和类型相同的 Const 节点）。
+  - **阶段间清理**：可选功能，在每个主优化 Pass 之后运行清理 Pass（CSE、常量折叠等），以获得最大优化效果。
 - **模块化设计**：核心引擎、优化器插件、工具集和测试框架完全解耦，易于扩展。
 
 ## 项目结构
@@ -25,6 +27,8 @@ graph TD
     Root --> Opts[optimizers/: 插件化优化器]
     Opts --> CF[concat_fusion.py: Concat 融合 Pass]
     Opts --> IR[identity_removal.py: Identity 移除 Pass]
+    Opts --> CSE[common_subexpression_elimination.py: CSE Pass]
+    Opts --> PH[pack_hoisting.py: Pack 提升 Pass]
     Root --> Tests[tests/: 模块化单元测试]
     Root --> Demos[demos/: 示例程序]
 ```
@@ -68,6 +72,27 @@ class MyOptimizationPass(PatternRewritePass):
         # 返回新的节点列表
         return [create_node("NoOp", root.name)]
 ```
+
+## 高级功能
+
+### 阶段间清理
+
+启用阶段间自动清理（CSE、常量折叠等）以获得更好的优化效果：
+
+```python
+from graph_optimizer import OptimizationPipeline
+
+pipeline = OptimizationPipeline(
+    input_graph="input.pb",
+    output_graph="output.pb",
+    level=2,
+    run_cleanup_between_passes=True,  # 启用清理
+    cleanup_passes=['common_subexpression_elimination'],  # 可选：指定清理 Pass
+)
+pipeline.run()
+```
+
+此功能可以显著提升优化效果（例如，在复杂图中从 19.9% 提升到 47.8% 的节点削减率），通过发现级联优化机会。
 
 ## 优化管理：Level 与 Priority
 

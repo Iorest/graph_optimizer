@@ -1,6 +1,6 @@
 import tensorflow.compat.v1 as tf
 import collections
-from typing import Dict, List, Set, Optional, Any as AnyType, Tuple
+from typing import Dict, List, Set, Optional, Any as AnyType, Tuple, Union
 from .utils.logger import (
     logger as logging,
     trace_transformation,
@@ -8,6 +8,38 @@ from .utils.logger import (
     log_match,
 )
 from .utils import save_graph
+
+
+class RewriteResult:
+    """
+    Result object returned by rewriter functions.
+    
+    Attributes:
+        new_nodes: New nodes to add to the graph
+        replaced_nodes: Node names to mark as replaced (in addition to anchor node)
+        node_mapping: Optional dict mapping old node names to new node names for consumer updates
+    """
+    
+    def __init__(
+        self, 
+        new_nodes: List[tf.NodeDef], 
+        replaced_nodes: Optional[List[str]] = None,
+        node_mapping: Optional[Dict[str, str]] = None
+    ):
+        self.new_nodes = new_nodes
+        self.replaced_nodes = replaced_nodes or []
+        self.node_mapping = node_mapping or {}
+    
+    @staticmethod
+    def from_nodes(nodes_or_result):
+        """Convert list/RewriteResult/None to RewriteResult format."""
+        if nodes_or_result is None:
+            return None
+        if isinstance(nodes_or_result, RewriteResult):
+            return nodes_or_result
+        if isinstance(nodes_or_result, list):
+            return RewriteResult(nodes_or_result)
+        raise TypeError(f"Invalid rewriter return type: {type(nodes_or_result)}")
 
 
 class GraphOptimizer:
@@ -28,40 +60,78 @@ class GraphOptimizer:
         ] = []  # Patterns that match any op_type
 
     def load_state(self, graph_def: tf.GraphDef):
-        """Restores the optimizer state from a GraphDef."""
+        """Restore optimizer state from GraphDef and rebuild consumer index."""
         self.graph_def = graph_def
-        self.nodes: Dict[str, tf.NodeDef] = {node.name: node for node in graph_def.node}
-        self.consumers: Dict[str, List[str]] = collections.defaultdict(list)
-        for node in graph_def.node:
-            for input_name in node.input:
-                base_name = input_name.split(":")[0].lstrip("^")
-                self.consumers[base_name].append(node.name)
-        self.pattern_index = collections.defaultdict(
-            list
-        )  # op_type -> [(pattern, rewriter)]
-        self.wildcard_patterns = []  # Patterns that match any op_type
+        self.nodes = {node.name: node for node in graph_def.node}
+        self._rebuild_consumer_index()
 
     def add_transformation(self, pattern, rewriter):
         """Adds a transformation rule (pattern -> rewriter)."""
-        # Note: rewriter may already be wrapped with trace_transformation by PatternRewritePass
-        # Don't wrap it again to avoid duplicate logging
         logging.info(
             f"Adding transformation: rule={rewriter.__name__} pattern={pattern}"
         )
 
-        # Index pattern by op_type for faster lookup
         op_type = pattern.get_indexed_op_type()
         if op_type is None:
-            # Wildcard pattern - must check against all nodes
             self.wildcard_patterns.append((pattern, rewriter))
         else:
-            # Specific op_type - only check against matching nodes
             self.pattern_index[op_type].append((pattern, rewriter))
 
     def clear_transformations(self):
-        """Clears all registered transformations."""
+        """Clear all registered transformations."""
         self.pattern_index = collections.defaultdict(list)
         self.wildcard_patterns = []
+    
+    def _rebuild_consumer_index(self):
+        """Rebuild consumer index from current graph nodes."""
+        self.consumers = collections.defaultdict(list)
+        for node in self.graph_def.node:
+            for input_name in node.input:
+                base_name = input_name.split(":")[0].lstrip("^")
+                self.consumers[base_name].append(node.name)
+    
+    @staticmethod
+    def _extract_base_name(input_name: str) -> str:
+        """
+        Extract base node name from input (strip port and control marker).
+        
+        Examples:
+            'node:0' -> 'node'
+            '^control_dep' -> 'control_dep'
+            'node:1' -> 'node'
+            'node' -> 'node'
+        """
+        return input_name.split(":")[0].lstrip("^")
+    
+    def _update_node_inputs(self, node: tf.NodeDef, node_mapping: Dict[str, str]):
+        """
+        Update node's inputs based on node_mapping (old_name -> new_name).
+        Preserves port numbers and control dependency markers.
+        """
+        updated_inputs = []
+        for input_name in node.input:
+            # Parse input: ^control or name:port or name
+            is_control = input_name.startswith("^")
+            base_name = self._extract_base_name(input_name)
+            
+            # Extract port if present
+            port = ""
+            if not is_control and ":" in input_name:
+                port = ":" + input_name.split(":", 1)[1]
+            
+            # Remap if in mapping
+            if base_name in node_mapping:
+                new_base = node_mapping[base_name]
+                if is_control:
+                    updated_inputs.append(f"^{new_base}")
+                else:
+                    updated_inputs.append(f"{new_base}{port}")
+            else:
+                updated_inputs.append(input_name)
+        
+        # Update in place
+        del node.input[:]
+        node.input.extend(updated_inputs)
 
     @log_optimization
     def optimize(
@@ -71,10 +141,7 @@ class GraphOptimizer:
         auto_cleanup=True,
         protected_nodes=None,
     ):
-        # protected_nodes: nodes with zero consumers that should NOT be pruned (e.g. outputs)
         protected_nodes = set(protected_nodes or [])
-        # Simplistic approach: iterate nodes and try to match
-        # In a real optimizer, we might need multiple passes or a worklist
         modified = True
         iteration = 0
         current_graph_def = self.graph_def
@@ -89,16 +156,11 @@ class GraphOptimizer:
             modified = False
             new_nodes = []
             replaced_node_names = set()
+            global_node_mapping = {}  # Collect all node mappings in this iteration
 
-            # Rebuild state for current graph and compute reference counts BEFORE optimization
+            # Rebuild state and compute reference counts before optimization
             self.nodes = {node.name: node for node in current_graph_def.node}
-            self.consumers = collections.defaultdict(list)
-            for node in current_graph_def.node:
-                for input_name in node.input:
-                    base_name = input_name.split(":")[0].lstrip("^")
-                    self.consumers[base_name].append(node.name)
-
-            # Store reference counts before optimization
+            self._rebuild_consumer_index()
             refs_before = self._compute_reference_counts(current_graph_def)
 
             for node in current_graph_def.node:
@@ -107,8 +169,7 @@ class GraphOptimizer:
 
                 match = None
 
-                # OPTIMIZED: Only check patterns relevant to this op_type
-                # Get patterns for this specific op_type + wildcard patterns
+                # Check patterns relevant to this op_type + wildcard patterns
                 candidates = (
                     self.pattern_index.get(node.op, []) + self.wildcard_patterns
                 )
@@ -117,10 +178,11 @@ class GraphOptimizer:
                 for pattern, rewriter in candidates:
                     match = pattern.match(node, self)
                     if match:
-                        new_stuff = rewriter(match, self)
-                        if new_stuff is not None:
-                            # PRESERVATION: Carry over ALL control dependencies from the match
-                            # Filter out control deps that point to nodes WITHIN the match (internal deps)
+                        rewriter_output = rewriter(match, self)
+                        if rewriter_output is not None:
+                            result = RewriteResult.from_nodes(rewriter_output)
+                            
+                            # Preserve external control dependencies
                             internal_names = match.all_matched_nodes
                             relevant_controls = [
                                 ci
@@ -128,16 +190,14 @@ class GraphOptimizer:
                                 if ci.lstrip("^") not in internal_names
                             ]
 
-                            if relevant_controls and new_stuff:
+                            if relevant_controls and result.new_nodes:
                                 target_node = None
-                                # 1. Try to find node with same name as root
-                                for new_node in new_stuff:
+                                for new_node in result.new_nodes:
                                     if new_node.name == node.name:
                                         target_node = new_node
                                         break
-                                # 2. Fallback: use first node in new_stuff
                                 if target_node is None:
-                                    target_node = new_stuff[0]
+                                    target_node = result.new_nodes[0]
 
                                 if target_node:
                                     existing = set(target_node.input)
@@ -146,13 +206,34 @@ class GraphOptimizer:
                                             target_node.input.append(ci)
                                             existing.add(ci)
 
-                            new_nodes.extend(new_stuff)
-                            # CRITICAL BUG FIX: Only mark the anchor node as replaced.
-                            # Other nodes in the match (internal nodes) will be naturally pruned
-                            # by auto_cleanup IF they no longer have any consumers (like the root).
-                            # If they still have other consumers (external to this match),
-                            # they MUST be preserved to avoid dangling inputs.
+                            new_nodes.extend(result.new_nodes)
                             replaced_node_names.add(node.name)
+                            
+                            # Collect node mappings from this rewrite
+                            if result.node_mapping:
+                                global_node_mapping.update(result.node_mapping)
+                            
+                            # Mark additional nodes as replaced if specified
+                            if result.replaced_nodes:
+                                # Safety check: verify no external consumers
+                                all_replaced = {node.name} | set(result.replaced_nodes)
+                                nodes_with_ext_consumers = self._check_external_consumers(
+                                    result.replaced_nodes, all_replaced, internal_names
+                                )
+                                
+                                if nodes_with_ext_consumers:
+                                    self._log_external_consumer_warning(nodes_with_ext_consumers)
+                                    safe_to_replace = [
+                                        name for name in result.replaced_nodes
+                                        if name not in [n for n, _ in nodes_with_ext_consumers]
+                                    ]
+                                    replaced_node_names.update(safe_to_replace)
+                                    logging.info(
+                                        f"Marked {len(safe_to_replace)}/{len(result.replaced_nodes)} nodes as replaced "
+                                        f"(skipped {len(nodes_with_ext_consumers)} with external consumers)"
+                                    )
+                                else:
+                                    replaced_node_names.update(result.replaced_nodes)
 
                             found_match = True
                             modified = True
@@ -162,10 +243,14 @@ class GraphOptimizer:
                     new_nodes.append(node)
 
             if modified:
+                # Apply node mappings to update all consumer references
+                if global_node_mapping:
+                    logging.info(f"Applying node mapping: {len(global_node_mapping)} remappings")
+                    for node in new_nodes:
+                        self._update_node_inputs(node, global_node_mapping)
+                
                 next_graph_def = tf.GraphDef()
                 next_graph_def.node.extend(new_nodes)
-                # Auto-prune dead nodes after each optimization iteration (if enabled)
-                # Pass the reference counts before optimization to detect newly dead nodes
                 if auto_cleanup:
                     current_graph_def = self._prune_dead_nodes(
                         next_graph_def, pass_name, refs_before, protected_nodes
@@ -173,8 +258,7 @@ class GraphOptimizer:
                 else:
                     current_graph_def = next_graph_def
 
-        # Final cleanup: prune any remaining dead nodes (if enabled)
-        # This catches nodes that became dead across multiple iterations
+        # Final cleanup
         if auto_cleanup:
             current_graph_def = self._final_prune(
                 current_graph_def, pass_name, protected_nodes
@@ -183,123 +267,120 @@ class GraphOptimizer:
         return current_graph_def
 
     def _compute_reference_counts(self, graph_def: tf.GraphDef) -> Dict[str, int]:
-        """Compute reference count for each node (how many other nodes use it)."""
+        """Compute reference count for each node."""
         reference_counts: Dict[str, int] = collections.defaultdict(int)
-
         for node in graph_def.node:
             for input_name in node.input:
-                # Strip port number and control dependency marker
-                base_name = input_name.split(":")[0].lstrip("^")
-                reference_counts[base_name] += 1
-
+                reference_counts[self._extract_base_name(input_name)] += 1
         return reference_counts
+    
+    def _check_external_consumers(self, replaced_nodes, all_replaced, internal_names):
+        """Check if replaced nodes have external consumers (not in replaced set)."""
+        nodes_with_ext_consumers = []
+        for replaced_name in replaced_nodes:
+            consumers = self.consumers.get(replaced_name, [])
+            external_consumers = [
+                c for c in consumers 
+                if c not in all_replaced and c not in internal_names
+            ]
+            if external_consumers:
+                nodes_with_ext_consumers.append((replaced_name, external_consumers))
+        return nodes_with_ext_consumers
+    
+    def _log_external_consumer_warning(self, nodes_with_ext_consumers):
+        """Log warning about nodes with external consumers."""
+        logging.warning("Nodes marked as replaced still have external consumers:")
+        for replaced_name, ext_consumers in nodes_with_ext_consumers[:3]:
+            consumer_list = ', '.join(ext_consumers[:5])
+            if len(ext_consumers) > 5:
+                consumer_list += f" and {len(ext_consumers) - 5} more..."
+            logging.warning(f"  - {replaced_name}: consumed by {consumer_list}")
+        if len(nodes_with_ext_consumers) > 3:
+            logging.warning(f"  ... and {len(nodes_with_ext_consumers) - 3} more nodes")
 
-    def _final_prune(
-        self,
-        graph_def: tf.GraphDef,
-        pass_name: Optional[str] = None,
-        protected_nodes: Optional[Set[str]] = None,
-    ) -> tf.GraphDef:
-        """Final cleanup pass to remove all remaining dead nodes."""
-        refs = self._compute_reference_counts(graph_def)
-        protected_nodes = protected_nodes or set()
-
-        dead_nodes: Set[str] = set()
-        for node in graph_def.node:
-            # Never prune Placeholders or Protected nodes
-            if node.op == "Placeholder" or node.name in protected_nodes:
-                continue
-
-            # Prune any node with zero references (except Placeholders)
-            if refs[node.name] == 0:
-                dead_nodes.add(node.name)
-
-        if not dead_nodes:
-            return graph_def
-
-        from .utils.logger import logger as local_logger
-
-        local_logger.info(
-            f"[{pass_name or 'optimize'}] Final pruning: removing {len(dead_nodes)} dead nodes: {', '.join(dead_nodes)}"
-        )
-
-        pruned_graph_def = tf.GraphDef()
-        for node in graph_def.node:
-            if node.name not in dead_nodes:
-                pruned_graph_def.node.add().CopyFrom(node)
-
-        return pruned_graph_def
-
-    def _prune_dead_nodes(
-        self, graph_def, pass_name=None, refs_before=None, protected_nodes=None
-    ):
-        """Remove nodes that are not referenced by any other node.
-
-        This is called after each optimization iteration to clean up
-        intermediate nodes that are no longer used (e.g., concat nodes
-        that have been fused into other concat operations).
-
-        Strategy:
-        - Prune nodes that had references before but now have none (newly dead)
-        - Always prune Const nodes with zero references
-        - Preserve Placeholder nodes
-        - Preserve Protected nodes
-        - Preserve nodes that were already unreferenced (likely outputs)
-
-        Args:
-            graph_def: The current GraphDef
-            pass_name: Name of the pass for logging purposes
-            refs_before: Reference counts before the optimization (optional)
-            protected_nodes: Set of node names to NOT prune
-
-        Returns:
-            A new GraphDef with dead nodes removed
+    def _final_prune(self, graph_def, pass_name=None, protected_nodes=None):
         """
-        # Compute current reference counts
+        Final cleanup pass to remove all remaining dead nodes.
+        Iteratively removes nodes with zero references until no more dead nodes exist.
+        """
+        protected_nodes = protected_nodes or set()
+        iteration = 0
+        max_iterations = 100
+        
+        while iteration < max_iterations:
+            refs = self._compute_reference_counts(graph_def)
+            
+            dead_nodes = {
+                node.name for node in graph_def.node
+                if node.op != "Placeholder" 
+                and node.name not in protected_nodes
+                and refs[node.name] == 0
+            }
+            
+            if not dead_nodes:
+                # No more dead nodes to remove
+                break
+            
+            logging.info(
+                f"[{pass_name or 'optimize'}] Final pruning iteration {iteration + 1}: "
+                f"removing {len(dead_nodes)} dead nodes: "
+                f"{', '.join(list(dead_nodes)[:5])}"
+                + (f" and {len(dead_nodes) - 5} more..." if len(dead_nodes) > 5 else "")
+            )
+            
+            graph_def = self._remove_nodes(graph_def, dead_nodes)
+            iteration += 1
+        
+        if iteration >= max_iterations:
+            logging.warning(
+                f"[{pass_name or 'optimize'}] Final pruning reached max iterations ({max_iterations})"
+            )
+        elif iteration > 0:
+            logging.info(
+                f"[{pass_name or 'optimize'}] Final pruning completed in {iteration} iteration(s)"
+            )
+        
+        return graph_def
+
+    def _prune_dead_nodes(self, graph_def, pass_name=None, refs_before=None, protected_nodes=None):
+        """Remove nodes that became dead after optimization."""
         refs_after = self._compute_reference_counts(graph_def)
         protected_nodes = protected_nodes or set()
 
-        # Identify nodes that can be pruned
         dead_nodes = set()
-
         for node in graph_def.node:
-            ref_after = refs_after[node.name]
-
-            # Never prune Placeholders or Protected nodes
             if node.op == "Placeholder" or node.name in protected_nodes:
                 continue
 
-            # Always prune Const nodes with zero references
-            if node.op == "Const" and ref_after == 0:
+            # Always prune unreferenced Const nodes
+            if node.op == "Const" and refs_after[node.name] == 0:
                 dead_nodes.add(node.name)
                 continue
 
-            # Prune nodes that BECAME dead (had refs before, now don't)
-            if refs_before is not None and node.name in refs_before:
-                ref_before = refs_before[node.name]
-                if ref_before > 0 and ref_after == 0:
-                    # This node was used before but not anymore - it's been optimized away
+            # Prune nodes that became dead (had refs before, now don't)
+            if refs_before and node.name in refs_before:
+                if refs_before[node.name] > 0 and refs_after[node.name] == 0:
                     dead_nodes.add(node.name)
 
-        # If no dead nodes, return original graph
-        if not dead_nodes:
-            return graph_def
-
-        # Log dead nodes being removed
-        from .utils.logger import logger as local_logger
-
-        local_logger.info(
-            f"[{pass_name or 'optimize'}] Pruning {len(dead_nodes)} dead nodes: "
-            f"{', '.join(sorted(list(dead_nodes)[:5]))}"
-            + (f" and {len(dead_nodes) - 5} more..." if len(dead_nodes) > 5 else "")
-        )
-
-        # Create new graph without dead nodes
+        if dead_nodes:
+            logging.info(
+                f"[{pass_name or 'optimize'}] Pruning {len(dead_nodes)} dead nodes: "
+                f"{', '.join(sorted(list(dead_nodes)[:5]))}"
+                + (f" and {len(dead_nodes) - 5} more..." if len(dead_nodes) > 5 else "")
+            )
+            return self._remove_nodes(graph_def, dead_nodes)
+        
+        return graph_def
+    
+    def _remove_nodes(self, graph_def, nodes_to_remove):
+        """Create new GraphDef without specified nodes."""
         pruned_graph_def = tf.GraphDef()
         for node in graph_def.node:
-            if node.name not in dead_nodes:
+            if node.name not in nodes_to_remove:
                 pruned_graph_def.node.add().CopyFrom(node)
-
+            else:
+                # 为每个被删除的节点添加日志
+                logging.debug(f"[GraphOptimizer] Removing node: {node.name} (op: {node.op})")
         return pruned_graph_def
 
     def canonicalize_axis(self, axis, rank):
@@ -764,8 +845,412 @@ def ConstValue(value, alias=None):
 class BasePass:
     """Base class for all graph optimization passes."""
 
-    def __init__(self, name=None):
+    def __init__(self, name=None, optimizer_alias=None):
+        """
+        Initialize a pass.
+        
+        Args:
+            name: Human-readable pass name (defaults to class name)
+            optimizer_alias: Short alias for node naming (e.g., 'pack_hoist', 'concat_fuse')
+                           If not provided, defaults to a simplified version of name
+        """
         self.name = name or self.__class__.__name__
+        self.optimizer_alias = optimizer_alias or self._generate_default_alias()
+        self._node_counters = {}  # Per-operation-type counters for unique node naming
+        self._node_cache = {}  # Node signature -> node name cache for deduplication
+    
+    def _generate_default_alias(self):
+        """Generate a default optimizer alias from the pass name."""
+        # Convert CamelCase to snake_case and remove 'Pass' suffix
+        import re
+        name = self.name
+        # Remove 'Pass' suffix if present
+        if name.endswith('Pass'):
+            name = name[:-4]
+        # Convert CamelCase to snake_case
+        name = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+        name = re.sub('([a-z0-9])([A-Z])', r'\1_\2', name).lower()
+        return name
+    
+    def make_node_name(self, root_node_name, op_type, suffix=""):
+        """
+        Create standardized node name for optimizer-generated nodes.
+        
+        Format: {original_root}/{optimizer_alias}/{op_type}[_{suffix}]
+                or {original_root}/{optimizer_alias}/{suffix} (if op_type is empty)
+        
+        This method extracts the original root name by removing any intermediate
+        optimizer layers (e.g., '/pack_hoist/', '/concat_fusion/') to prevent
+        nested naming during recursive optimizations.
+        
+        Args:
+            root_node_name: The root node name (may contain optimizer layers)
+            op_type: Operation type (e.g., 'Pack', 'MatMul', 'Concat'), can be empty
+            suffix: Optional suffix for disambiguation (e.g., 'pack_0', 'matmul_1')
+        
+        Returns:
+            Formatted node name without nested optimizer layers
+        
+        Examples:
+            root='model/layer1/Pack', op='', suffix='pack_0'
+            -> 'model/layer1/Pack/pack_hoist/pack_0'
+            
+            root='model/layer1/Pack/pack_hoist/pack_0', op='', suffix='matmul_1'
+            -> 'model/layer1/Pack/pack_hoist/matmul_1' (not nested!)
+        """
+        # Remove any existing optimizer layer to get the original root
+        # Pattern: anything like '/optimizer_alias/' should be removed
+        parts = root_node_name.split('/')
+        
+        # Find and remove optimizer layer patterns (e.g., 'pack_hoist', 'concat_fusion')
+        cleaned_parts = []
+        skip_next = False
+        for i, part in enumerate(parts):
+            if skip_next:
+                skip_next = False
+                continue
+            # Check if this looks like an optimizer alias (snake_case with common patterns)
+            if ('_' in part and (part.endswith('_hoist') or part.endswith('_fusion') or 
+                                  part.endswith('_rm') or part.endswith('_fuse'))):
+                # This is an optimizer layer, skip it and the next part (op name)
+                skip_next = True
+                continue
+            cleaned_parts.append(part)
+        
+        original_root = '/'.join(cleaned_parts)
+        
+        # Build the name based on whether op_type is provided
+        if op_type:
+            base_name = f"{original_root}/{self.optimizer_alias}/{op_type}"
+            if suffix:
+                return f"{base_name}_{suffix}"
+            return base_name
+        else:
+            # When op_type is empty, suffix should contain the full name part
+            return f"{original_root}/{self.optimizer_alias}/{suffix}"
+    
+    def make_unique_node_name(self, root_node_name, op_type):
+        """
+        Create a unique node name with automatic counter management.
+        
+        This is a convenience method that combines make_node_name with automatic
+        per-operation-type counting to ensure unique names across the optimization.
+        
+        Format: {original_root}/{optimizer_alias}/{op_type_lower}_{counter}
+        
+        Args:
+            root_node_name: The root node name (may contain optimizer layers)
+            op_type: Operation type (e.g., 'Pack', 'MatMul', 'Concat')
+        
+        Returns:
+            Unique formatted node name with auto-incremented counter
+        
+        Examples:
+            First call with op_type='MatMul' -> 'path/pack_hoist/matmul_0'
+            Second call with op_type='MatMul' -> 'path/pack_hoist/matmul_1'
+            First call with op_type='BiasAdd' -> 'path/pack_hoist/biasadd_0'
+        """
+        op_type_lower = op_type.lower()
+        
+        # Initialize counter for this op type if not exists
+        if op_type_lower not in self._node_counters:
+            self._node_counters[op_type_lower] = 0
+        
+        # Get current counter and increment
+        counter = self._node_counters[op_type_lower]
+        self._node_counters[op_type_lower] += 1
+        
+        # Generate name with counter as suffix
+        return self.make_node_name(root_node_name, "", f"{op_type_lower}_{counter}")
+    
+    def reset_counters(self):
+        """
+        Reset all node counters and caches.
+        
+        This should typically be called at the start of each transform() to ensure
+        consistent naming across optimization passes.
+        """
+        self._node_counters.clear()
+        self._node_cache.clear()
+    
+    @staticmethod
+    def clean_input_name(input_name):
+        """
+        Extract base node name from input (strip port and control marker).
+        
+        This is an alias for _extract_base_name for compatibility with subclasses.
+        
+        Args:
+            input_name: Input name (may contain :port or ^ prefix)
+            
+        Returns:
+            str: Cleaned base node name
+            
+        Examples:
+            'node:0' -> 'node'
+            '^control_dep' -> 'control_dep'
+            'node:1' -> 'node'
+            'node' -> 'node'
+        """
+        return input_name.split(':')[0].lstrip('^')
+    
+    @staticmethod
+    def extract_key_attrs(attrs, op_type=None):
+        """
+        提取关键属性用于节点签名（排除形状等运行时属性）。
+        
+        跳过的属性：_output_shapes, _class
+        对于大多数节点，T 和 dtype 通常是推断出来的，不影响语义等价性。
+        但对于 Const 节点，dtype 是关键属性，必须包含在签名中。
+        
+        Args:
+            attrs: 属性字典（AttrValue对象）
+            op_type: 节点操作类型（用于特殊处理某些操作）
+            
+        Returns:
+            tuple: 属性签名元组 (attr_name, type, value)
+            
+        Examples:
+            {'axis': AttrValue(i=0), 'T': AttrValue(type=DT_FLOAT)}
+            -> (('axis', 'i', 0),)
+            
+            Const 节点会包含 dtype:
+            {'value': tensor, 'dtype': DT_INT32}
+            -> (('dtype', 'type', DT_INT32), ('value', 'tensor', <bytes>))
+        """
+        key_attrs = []
+        # 基础跳过属性
+        skip_attrs = {'_output_shapes', '_class'}
+        
+        # 对于非 Const 节点，额外跳过 T 和 dtype
+        if op_type != 'Const':
+            skip_attrs.update({'T', 'dtype'})
+        
+        for attr_name in sorted(attrs.keys()):
+            if attr_name in skip_attrs:
+                continue
+            
+            attr_value = attrs[attr_name]
+            # 简化属性值表示
+            if attr_value.HasField('i'):
+                key_attrs.append((attr_name, 'i', attr_value.i))
+            elif attr_value.HasField('f'):
+                key_attrs.append((attr_name, 'f', attr_value.f))
+            elif attr_value.HasField('b'):
+                key_attrs.append((attr_name, 'b', attr_value.b))
+            elif attr_value.HasField('s'):
+                key_attrs.append((attr_name, 's', attr_value.s))
+            elif attr_value.HasField('type'):
+                # 数据类型（对 Const 节点很重要）
+                key_attrs.append((attr_name, 'type', attr_value.type))
+            elif attr_value.HasField('tensor'):
+                # 对于 tensor 类型（Const 节点的 value 属性）
+                # 将 tensor 序列化为字节串作为签名，确保相同值的常量有相同签名
+                tensor = attr_value.tensor
+                tensor_bytes = tensor.SerializeToString()
+                key_attrs.append((attr_name, 'tensor', tensor_bytes))
+        
+        return tuple(key_attrs)
+    
+    def create_node_signature(self, node, sort_inputs=True):
+        """
+        创建节点签名用于识别语义相同的节点。
+        
+        签名包括：操作类型、输入列表、关键属性
+        
+        对于 Const 节点，会包含 dtype 和 value 进行比较。
+        
+        Args:
+            node: tf.NodeDef 节点
+            sort_inputs: 是否排序输入（对于可交换操作可以设为True）
+            
+        Returns:
+            tuple: (op_type, inputs_tuple, key_attrs)
+            
+        Examples:
+            Pack([a, b, c], axis=0) -> ('Pack', ('a', 'b', 'c'), (('axis', 'i', 0),))
+            Const(value=16, dtype=int32) -> ('Const', (), (('dtype', 'type', DT_INT32), ('value', 'tensor', <bytes>)))
+        """
+        # 清理输入名称
+        cleaned_inputs = [self.clean_input_name(inp) for inp in node.input]
+        
+        # 根据需要排序输入
+        if sort_inputs:
+            inputs_tuple = tuple(sorted(cleaned_inputs))
+        else:
+            inputs_tuple = tuple(cleaned_inputs)
+        
+        # 提取关键属性（传入 op_type 以便特殊处理）
+        key_attrs = self.extract_key_attrs(node.attr, op_type=node.op)
+        
+        return (node.op, inputs_tuple, key_attrs)
+    
+    def get_or_create_cached_node(self, op_type, inputs, attrs, root_node_name, 
+                                   context_desc="", create_func=None):
+        """
+        获取或创建缓存节点的统一接口（用于节点去重）。
+        
+        工作原理：
+        1. 根据 (op_type, inputs, attrs) 创建签名
+        2. 如果签名已存在于缓存，返回缓存的节点名
+        3. 否则创建新节点，加入缓存，返回新节点
+        
+        Args:
+            op_type: 操作类型
+            inputs: 输入列表（节点名称列表）
+            attrs: 属性字典（AttrValue对象）
+            root_node_name: 根节点名称（用于生成唯一名称）
+            context_desc: 上下文描述（用于日志）
+            create_func: 可选的节点创建函数 func(name, inputs, attrs) -> NodeDef
+                        如果为None，则返回None作为new_node
+            
+        Returns:
+            tuple: (node_name, is_new_node, node_def_or_none)
+                - node_name: 节点名称（缓存命中时是已存在的名称）
+                - is_new_node: 是否是新创建的节点
+                - node_def_or_none: 如果是新节点返回NodeDef，否则返回None
+        """
+        from .utils import create_node
+        
+        # 创建节点签名（输入保持顺序）
+        inputs_tuple = tuple(inputs)
+        key_attrs = self.extract_key_attrs(attrs, op_type=op_type)
+        node_signature = (op_type, inputs_tuple, key_attrs)
+        
+        # 检查缓存
+        if node_signature in self._node_cache:
+            cached_name = self._node_cache[node_signature]
+            if context_desc:
+                logging.info(f"[{self.name}] {context_desc}: REUSING cached {op_type} node {cached_name}")
+            return cached_name, False, None
+        
+        # 创建新节点
+        new_name = self.make_unique_node_name(root_node_name, op_type)
+        
+        if create_func:
+            new_node = create_func(new_name, inputs, attrs)
+        else:
+            new_node = create_node(op_type, new_name, inputs=inputs, attr=attrs)
+        
+        # 缓存节点
+        self._node_cache[node_signature] = new_name
+        if context_desc:
+            logging.debug(f"[{self.name}] {context_desc}: created new {op_type} node {new_name}")
+        
+        return new_name, True, new_node
+    
+    def build_deduplication_map(self, optimizer, skip_ops=None):
+        """
+        构建全局去重映射，识别图中语义相同的重复节点。
+        
+        Args:
+            optimizer: GraphOptimizer 实例
+            skip_ops: 要跳过的操作类型集合（这些节点不应去重）
+                     默认跳过：Placeholder, Variable, VariableV2, Identity
+                     注意：Const 节点默认不跳过，可以根据 value 和 dtype 去重
+            
+        Returns:
+            dict: {duplicate_node_name -> canonical_node_name}
+            
+        Examples:
+            如果图中有两个完全相同的 MatMul 节点：
+            - MatMul_1(a, b) 
+            - MatMul_2(a, b)  # 重复
+            返回: {'MatMul_2': 'MatMul_1'}
+        """
+        from collections import defaultdict
+        
+        if skip_ops is None:
+            skip_ops = {'Placeholder', 'Variable', 'VariableV2', 'Identity'}
+        
+        # 按节点签名分组
+        nodes_by_signature = defaultdict(list)
+        
+        for node in optimizer.graph_def.node:
+            # 跳过某些不应该去重的节点类型
+            if node.op in skip_ops:
+                continue
+            
+            signature = self.create_node_signature(node, sort_inputs=False)
+            nodes_by_signature[signature].append(node.name)
+        
+        # 构建去重映射
+        dedup_map = {}
+        
+        for signature, node_names in nodes_by_signature.items():
+            if len(node_names) <= 1:
+                continue
+            
+            # 选择名字最短的作为规范节点（canonical node）
+            canonical = min(node_names, key=lambda n: (len(n), n))
+            
+            for node_name in node_names:
+                if node_name != canonical:
+                    dedup_map[node_name] = canonical
+        
+        return dedup_map
+    
+    def apply_deduplication_map(self, optimizer, dedup_map):
+        """
+        应用去重映射：更新所有节点的输入引用，删除重复节点。
+        
+        工作流程：
+        1. 遍历所有节点，更新输入引用（将重复节点替换为规范节点）
+        2. 删除映射中的重复节点
+        3. 重建优化器的内部索引
+        
+        Args:
+            optimizer: GraphOptimizer 实例
+            dedup_map: 去重映射 {duplicate_node_name -> canonical_node_name}
+        """
+        removed_nodes = set(dedup_map.keys())
+        
+        # 更新所有节点的输入引用
+        for node in optimizer.graph_def.node:
+            if node.name in removed_nodes:
+                continue
+            
+            new_inputs = []
+            for inp in node.input:
+                # 提取基础名称（去除端口和控制依赖标记）
+                port_suffix = ''
+                control_prefix = ''
+                
+                if inp.startswith('^'):
+                    control_prefix = '^'
+                    inp = inp[1:]
+                
+                if ':' in inp:
+                    base_name, port = inp.split(':', 1)
+                    port_suffix = ':' + port
+                else:
+                    base_name = inp
+                
+                # 应用映射
+                if base_name in dedup_map:
+                    new_base = dedup_map[base_name]
+                    new_inp = control_prefix + new_base + port_suffix
+                    new_inputs.append(new_inp)
+                else:
+                    new_inputs.append(control_prefix + base_name + port_suffix)
+            
+            # 更新节点的输入列表
+            del node.input[:]
+            node.input.extend(new_inputs)
+        
+        # 删除重复节点（为每个节点添加日志）
+        for node in optimizer.graph_def.node:
+            if node.name in removed_nodes:
+                canonical = dedup_map[node.name]
+                logging.info(f"[{self.name}] Removing duplicate node: {node.name} (op: {node.op}) -> keeping {canonical}")
+        
+        new_nodes = [n for n in optimizer.graph_def.node if n.name not in removed_nodes]
+        del optimizer.graph_def.node[:]
+        optimizer.graph_def.node.extend(new_nodes)
+        
+        # 重建优化器内部状态
+        optimizer.nodes = {node.name: node for node in optimizer.graph_def.node}
+        optimizer._rebuild_consumer_index()
 
     def transform(
         self,
@@ -792,8 +1277,8 @@ class BasePass:
 class PatternRewritePass(BasePass):
     """A pass that applies a pattern-matching-based rewrite."""
 
-    def __init__(self, pattern, rewriter, name=None):
-        super().__init__(name)
+    def __init__(self, pattern, rewriter, name=None, optimizer_alias=None):
+        super().__init__(name, optimizer_alias)
         self.pattern = pattern
         self.rewriter = trace_transformation(rewriter)
 
@@ -806,6 +1291,9 @@ class PatternRewritePass(BasePass):
         protected_nodes=None,
     ):
         """Apply this pass using GraphOptimizer.optimize()."""
+        # Reset node counters at the start of each transform
+        self.reset_counters()
+        
         # Add this transformation to the optimizer
         optimizer.add_transformation(self.pattern, self.rewriter)
 

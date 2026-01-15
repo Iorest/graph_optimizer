@@ -1,12 +1,17 @@
 import os
 import sys
+
+# Add parent directory to path for imports
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, parent_dir)
+
 import tensorflow.compat.v1 as tf
 import numpy as np
 from graph_optimizer.utils import load_graph, create_node, create_complex_concat_graph
 from graph_optimizer.runner import OptimizationPipeline
-
+from graph_optimizer.utils.logger import set_log_level, DEBUG
 tf.disable_v2_behavior()
-
+set_log_level(DEBUG)
 
 def evaluate_graph(graph_def, output_node_names):
     """Run the graph and return outputs."""
@@ -49,26 +54,39 @@ def evaluate_graph(graph_def, output_node_names):
 
 def main():
     # 1. Generate the graph
-    input_path = "demos/complex_concat_graph.pbtxt"
-    output_path = "demos/complex_concat_graph_optimized.pbtxt"
+    input_path = "demos/graph_def_rankmixer.pb"
+    output_path = "demos/graph_def_rankmixer_optimized.pb"
 
     # Generate the complex graph
-    print(f"Generating graph to {input_path}...")
-    create_complex_concat_graph(input_path)
+    # print(f"Generating graph to {input_path}...")
+    # create_complex_concat_graph(input_path)
 
     # 2. Evaluate original graph
     print("Evaluating original graph...")
     original_graph = load_graph(input_path)
     output_nodes = ["output"]
-    original_results, feed_dict_values = evaluate_graph(original_graph, output_nodes)
+    # original_results, feed_dict_values = evaluate_graph(original_graph, output_nodes)
 
     # 3. Optimize
     print("\nStarting optimization pipeline...")
     pipeline = OptimizationPipeline(
-        input_path, output_path, level=2, debug=True, output_nodes=["output"]
+        input_graph=input_path,              # Path to input graph PB file
+        output_graph=output_path,            # Path to save optimized graph
+        level=1,                             # Optimization level (1=Basic, 2=Advanced)
+        debug=True,                          # Enable debug mode (dump intermediate graphs)
+        output_nodes=["predicts"],  # Graph output nodes (protected from pruning)
+        protected_nodes=["compile_batch_size_ret"],          # Nodes to protect from pruning
+        # remove_passes=["common_subexpression_elimination"],
+        # Optional parameters (not used in this demo):
+        # passes=None,                       # Explicit list of passes (overrides level)
+        # add_passes=None,                   # Additional passes to append
+        # remove_passes=None,                # Passes to remove from default set
+        # protected_nodes=None,              # Additional nodes to protect from pruning
+        # log_file=None,                     # Path to log file
+        # config=None,                       # Dict with configuration overrides
     )
     pipeline.run()
-
+    return 0
     # 4. Evaluate optimized graph
     print("\nEvaluating optimized graph...")
     optimized_graph = load_graph(output_path)
