@@ -133,16 +133,29 @@ class CommonSubexpressionElimination(BasePass):
         
         total_removed = 0
         iteration = 0
+        max_iterations = 100  # 安全限制，防止无限循环
+        
+        # 准备受保护节点集合
+        protected_set = set(protected_nodes or [])
         
         # 迭代执行直到没有新的重复节点
         while True:
             iteration += 1
+            
+            # 检查迭代次数限制
+            if iteration > max_iterations:
+                logging.warning(
+                    f"[{self.name}] Reached maximum iterations ({max_iterations}). "
+                    f"Stopping to prevent infinite loop."
+                )
+                break
+            
             current_node_count = len(optimizer.nodes)
             
             logging.info(f"[{self.name}] Iteration {iteration}: scanning {current_node_count} nodes...")
             
             # 构建去重映射
-            dedup_map = self.build_deduplication_map(optimizer, self.skip_ops)
+            dedup_map = self.build_deduplication_map(optimizer, self.skip_ops, protected_set)
             
             if not dedup_map:
                 logging.info(f"[{self.name}] Iteration {iteration}: no duplicates found, converged.")

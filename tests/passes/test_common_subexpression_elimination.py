@@ -540,6 +540,53 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(final_count, initial_count)
         self.assertIn("add_1", optimizer.nodes)
         self.assertIn("add_2", optimizer.nodes)
+    
+    def test_protected_nodes_not_removed(self):
+        """Test 21: Protected nodes should not be removed even if they are duplicates."""
+        nodes = [
+            self._make_placeholder("input", tf.float32),
+            self._make_const("weights_1", 1.0, tf.float32),
+            self._make_const("weights_2", 1.0, tf.float32),  # Duplicate but protected
+            create_node("Add", "add_1", inputs=["input", "weights_1"]),
+            create_node("Add", "add_2", inputs=["input", "weights_2"]),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        # Protect weights_2 - it should not be removed
+        cse_pass.transform(optimizer, protected_nodes=["weights_2", "add_2"])
+        final_count = len(optimizer.nodes)
+        
+        # weights_2 and add_2 should NOT be removed (protected)
+        # But weights_1 may be kept as canonical for the Const nodes
+        # And add_1 may be kept as canonical for the Add nodes
+        self.assertIn("weights_2", optimizer.nodes, "Protected node weights_2 should not be removed")
+        self.assertIn("add_2", optimizer.nodes, "Protected node add_2 should not be removed")
+    
+    def test_protected_nodes_as_canonical(self):
+        """Test 22: Protected nodes should be preferred as canonical nodes."""
+        nodes = [
+            self._make_placeholder("input", tf.float32),
+            self._make_const("const_a", 1.0, tf.float32),
+            self._make_const("const_b_protected", 1.0, tf.float32),  # Protected, should be canonical
+            self._make_const("const_c", 1.0, tf.float32),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        # Protect const_b - it should become the canonical node
+        cse_pass.transform(optimizer, protected_nodes=["const_b_protected"])
+        
+        # const_b_protected should remain (it's protected and should be canonical)
+        self.assertIn("const_b_protected", optimizer.nodes)
+        # const_a and const_c should be removed (redirected to const_b_protected)
+        self.assertNotIn("const_a", optimizer.nodes)
+        self.assertNotIn("const_c", optimizer.nodes)
 
 
 if __name__ == "__main__":

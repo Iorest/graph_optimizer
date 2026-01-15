@@ -1139,7 +1139,7 @@ class BasePass:
         
         return new_name, True, new_node
     
-    def build_deduplication_map(self, optimizer, skip_ops=None):
+    def build_deduplication_map(self, optimizer, skip_ops=None, protected_nodes=None):
         """
         构建全局去重映射，识别图中语义相同的重复节点。
         
@@ -1148,6 +1148,7 @@ class BasePass:
             skip_ops: 要跳过的操作类型集合（这些节点不应去重）
                      默认跳过：Placeholder, Variable, VariableV2, Identity
                      注意：Const 节点默认不跳过，可以根据 value 和 dtype 去重
+            protected_nodes: 受保护的节点集合（这些节点不会被删除，但可以作为规范节点）
             
         Returns:
             dict: {duplicate_node_name -> canonical_node_name}
@@ -1162,6 +1163,8 @@ class BasePass:
         
         if skip_ops is None:
             skip_ops = {'Placeholder', 'Variable', 'VariableV2', 'Identity'}
+        
+        protected_set = set(protected_nodes or [])
         
         # 按节点签名分组
         nodes_by_signature = defaultdict(list)
@@ -1182,11 +1185,19 @@ class BasePass:
             if len(node_names) <= 1:
                 continue
             
-            # 选择名字最短的作为规范节点（canonical node）
-            canonical = min(node_names, key=lambda n: (len(n), n))
+            # 选择规范节点：优先选择受保护的节点，然后是名字最短的
+            protected_candidates = [n for n in node_names if n in protected_set]
             
+            if protected_candidates:
+                # 如果有受保护的节点，从中选择名字最短的作为规范节点
+                canonical = min(protected_candidates, key=lambda n: (len(n), n))
+            else:
+                # 否则选择名字最短的作为规范节点
+                canonical = min(node_names, key=lambda n: (len(n), n))
+            
+            # 将所有非规范节点（且非受保护节点）映射到规范节点
             for node_name in node_names:
-                if node_name != canonical:
+                if node_name != canonical and node_name not in protected_set:
                     dedup_map[node_name] = canonical
         
         return dedup_map
