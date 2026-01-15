@@ -3,7 +3,7 @@ from ..utils import create_node
 from ..utils.logger import logger as logging
 
 
-@PassRegistry.register("concat_fusion", opt_level=3, priority=20)
+@PassRegistry.register("concat_fusion", opt_level=3, priority=40)
 class ConcatFusionPass(PatternRewritePass):
     """
     Fuses multi-level ConcatV2 operations with the same axis.

@@ -176,16 +176,19 @@ class OptimizationPipeline:
             return (meta["priority"], name)
         return (100, name)  # Default priority
     
-    def _run_cleanup_passes(self, optimizer, step_num):
+    def _run_cleanup_passes(self, optimizer, step_num, is_final=False):
         """
         Run cleanup passes (CSE, constant folding, etc.) after a main optimization pass.
         
         Args:
             optimizer: GraphOptimizer instance
             step_num: Current step number (for debug output)
+            is_final: True if this is the final cleanup after all main passes
         """
         if not self.cleanup_passes:
             return
+        
+        context = "final" if is_final else f"after step {step_num}"
         
         for cleanup_pass_name in self.cleanup_passes:
             if cleanup_pass_name not in PassRegistry._registered_passes:
@@ -197,7 +200,7 @@ class OptimizationPipeline:
             try:
                 cleanup_instance = PassRegistry.get_pass(cleanup_pass_name)
                 custom_logger.info(
-                    f"Running cleanup pass '{cleanup_pass_name}' after step {step_num}..."
+                    f"Running cleanup pass '{cleanup_pass_name}' {context}..."
                 )
                 
                 # Clear transformations before cleanup pass
@@ -205,14 +208,17 @@ class OptimizationPipeline:
                 
                 # Run cleanup pass (save as substep if debug enabled)
                 if self.debug_dir:
-                    debug_filename = f"{step_num:02d}_{cleanup_pass_name}_cleanup.pb"
+                    if is_final:
+                        debug_filename = f"{step_num:02d}_{cleanup_pass_name}_final_cleanup.pb"
+                    else:
+                        debug_filename = f"{step_num:02d}_{cleanup_pass_name}_cleanup.pb"
                     cleanup_debug_path = os.path.join(self.debug_dir, debug_filename)
                 else:
                     cleanup_debug_path = None
                 
                 cleanup_instance.transform(
                     optimizer,
-                    step=f"{step_num}_cleanup",
+                    step=f"{step_num}_cleanup" if not is_final else "final_cleanup",
                     debug_dir=None,  # Don't let cleanup pass save its own debug files
                     protected_nodes=self.protected_nodes,
                 )
@@ -228,6 +234,54 @@ class OptimizationPipeline:
                 )
                 custom_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
                 # Don't rollback for cleanup passes, just continue
+    
+    def _execute_main_passes(self, optimizer):
+        """
+        Execute all main optimization passes.
+        
+        Args:
+            optimizer: GraphOptimizer instance
+        """
+        import tensorflow.compat.v1 as tf
+        
+        for i, pass_name in enumerate(self.resolved_passes):
+            if pass_name not in PassRegistry._registered_passes:
+                custom_logger.warning(
+                    f"Pass '{pass_name}' not found in registry. Skipping."
+                )
+                continue
+            
+            try:
+                # Create a backup copy of the graph def for potential rollback
+                backup_graph = tf.GraphDef()
+                backup_graph.CopyFrom(optimizer.graph_def)
+                
+                # Get pass instance and clear old transformations
+                pass_instance = PassRegistry.get_pass(pass_name)
+                optimizer.clear_transformations()
+                
+                # Execute the pass
+                pass_instance.transform(
+                    optimizer,
+                    step=i + 1,
+                    debug_dir=self.debug_dir,
+                    protected_nodes=self.protected_nodes,
+                )
+                
+                # Run cleanup passes after each main pass (if enabled)
+                if self.run_cleanup_between_passes:
+                    self._run_cleanup_passes(optimizer, step_num=i + 1, is_final=False)
+                
+            except Exception as e:
+                import traceback
+                custom_logger.error(f"Error applying pass '{pass_name}': {e}")
+                custom_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
+                custom_logger.warning(
+                    f"Rolling back graph state before pass '{pass_name}'..."
+                )
+                optimizer.load_state(backup_graph)
+                # Continue execution of other passes
+                continue
 
     def run(self):
         """Executes the optimization pipeline."""
@@ -261,53 +315,20 @@ class OptimizationPipeline:
         if self.run_cleanup_between_passes:
             custom_logger.info(f"Cleanup passes will run between main passes: {self.cleanup_passes}")
         
-        for i, pass_name in enumerate(self.resolved_passes):
-            if pass_name in PassRegistry._registered_passes:
-                try:
-                    # BACKUP: Create a deep copy of the graph def
-                    # Since GraphDef is a protobuf, assume tf.GraphDef
-                    import tensorflow.compat.v1 as tf
-
-                    backup_graph = tf.GraphDef()
-                    backup_graph.CopyFrom(optimizer.graph_def)
-
-                    pass_instance = PassRegistry.get_pass(pass_name)
-                    # FIX: Clear old transformations to avoid accumulation and loops
-                    optimizer.clear_transformations()
-
-                    # Pass handles saving inside transform
-                    pass_instance.transform(
-                        optimizer,
-                        step=i + 1,
-                        debug_dir=self.debug_dir,
-                        protected_nodes=self.protected_nodes,
-                    )
-                    
-                    # Run cleanup passes after each main pass (if enabled)
-                    if self.run_cleanup_between_passes:
-                        self._run_cleanup_passes(optimizer, i + 1)
-                    
-                except Exception as e:
-                    import traceback
-                    custom_logger.error(f"Error applying pass '{pass_name}': {e}")
-                    custom_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
-                    custom_logger.warning(
-                        f"Rolling back graph state before pass '{pass_name}'..."
-                    )
-                    optimizer.load_state(backup_graph)
-                    # Continue execution of other passes
-                    continue
-            else:
-                custom_logger.warning(
-                    f"Pass '{pass_name}' not found in registry. Skipping."
-                )
-
+        # Execute all main optimization passes
+        self._execute_main_passes(optimizer)
+        
+        # Run final cleanup passes after all main passes are done
+        if self.cleanup_passes:
+            custom_logger.info(f"Running final cleanup passes: {self.cleanup_passes}")
+            self._run_cleanup_passes(optimizer, step_num=len(self.resolved_passes) + 1, is_final=True)
+        
         if self.output_graph:
             custom_logger.info(f"Saving optimized graph to {self.output_graph}")
             save_graph(optimizer.graph_def, self.output_graph)
 
         if self.debug_dir:
-            save_graph(optimizer.graph_def, os.path.join(self.debug_dir, "99_final.pb"))
+            save_graph(optimizer.graph_def, os.path.join(self.debug_dir, "final.pb"))
 
         custom_logger.info("Optimization completed successfully.")
         return optimizer.graph_def

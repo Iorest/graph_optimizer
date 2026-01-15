@@ -72,10 +72,11 @@ def main():
     pipeline = OptimizationPipeline(
         input_graph=input_path,              # Path to input graph PB file
         output_graph=output_path,            # Path to save optimized graph
-        level=1,                             # Optimization level (1=Basic, 2=Advanced)
+        level=3,                             # Optimization level (1=Basic, 2=Advanced)
         debug=True,                          # Enable debug mode (dump intermediate graphs)
         output_nodes=["predicts"],  # Graph output nodes (protected from pruning)
         protected_nodes=["compile_batch_size_ret"],          # Nodes to protect from pruning
+        run_cleanup_between_passes = True,
         # remove_passes=["common_subexpression_elimination"],
         # Optional parameters (not used in this demo):
         # passes=None,                       # Explicit list of passes (overrides level)

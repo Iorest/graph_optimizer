@@ -45,7 +45,7 @@ from ..utils.logger import logger as logging
 from ..core import PassRegistry, BasePass
 
 
-@PassRegistry.register("common_subexpression_elimination", opt_level=3, priority=15)
+@PassRegistry.register("common_subexpression_elimination", opt_level=1, priority=60)
 class CommonSubexpressionElimination(BasePass):
     """
     Common Subexpression Elimination Pass.
