@@ -26,6 +26,20 @@ Const 节点去重规则：
     - Const(value=1, dtype=int32) 和 Const(value=1, dtype=int32) → 重复，合并
     - Const(value=1, dtype=int32) 和 Const(value=1, dtype=float32) → 不同，保留
 
+不可去重的操作类型：
+    1. 输入节点：Placeholder（每个输入都是独立的）
+    2. 有状态操作：Variable, VarHandleOp, ReadVariableOp（每次访问可能得到不同值）
+    3. 随机操作：RandomUniform, RandomNormal（每次调用结果不同）
+    4. 副作用操作：Print, Assert（执行次数有意义）
+    5. 控制流操作：Switch, Merge, Enter, Exit（控制流结构不可合并）
+    6. Identity 操作：由专门的 identity_removal pass 处理
+    7. 队列/栈/数组操作：QueueDequeueV2, StackPopV2, TensorArrayReadV3（有状态）
+
+控制依赖的处理：
+    控制依赖（^node）会被包含在节点签名中，因此：
+    - Add(a, b, ^ctrl1) 和 Add(a, b, ^ctrl2) → 不同的控制依赖，不会合并
+    - Add(a, b, ^ctrl1) 和 Add(a, b, ^ctrl1) → 相同的控制依赖，会合并
+
 示例：
     原图：
         a = MatMul(x, w)
@@ -45,7 +59,7 @@ from ..utils.logger import logger as logging
 from ..core import PassRegistry, BasePass
 
 
-@PassRegistry.register("common_subexpression_elimination", opt_level=1, priority=60)
+@PassRegistry.register("common_subexpression_elimination", opt_level=1, priority=20)
 class CommonSubexpressionElimination(BasePass):
     """
     Common Subexpression Elimination Pass.
@@ -65,9 +79,35 @@ class CommonSubexpressionElimination(BasePass):
             'Placeholder',   # 输入节点不应去重
             'Variable',      # 变量节点有状态，不应去重
             'VariableV2',
+            'VarHandleOp',   # TF2.x 变量句柄
+            'ReadVariableOp', # 读取变量的操作（每次读取可能得到不同值）
+            'AssignVariableOp', # 变量赋值有副作用
+            'AssignAddVariableOp', # 变量累加有副作用
+            'AssignSubVariableOp', # 变量减法有副作用
             'Identity',      # Identity 节点由专门的 pass 处理
             'NoOp',          # 控制流节点
             'Assert',        # 断言节点
+            'Print',         # 打印操作有副作用
+            'RandomUniform', # 随机操作每次调用结果不同
+            'RandomNormal',
+            'RandomStandardNormal',
+            'TruncatedNormal',
+            'Multinomial',
+            'QueueDequeueV2', # 队列操作有状态
+            'QueueEnqueueV2',
+            'StackPushV2',    # 栈操作有状态
+            'StackPopV2',
+            'TensorArrayReadV3',  # 数组操作有状态
+            'TensorArrayWriteV3',
+            'TensorArrayGatherV3',
+            'TensorArrayScatterV3',
+            # 控制流操作
+            'Switch',
+            'Merge',
+            'Enter',
+            'Exit',
+            'NextIteration',
+            'LoopCond',
         }
     
     def transform(self, optimizer, step=None, debug_dir=None, auto_cleanup=True, protected_nodes=None):

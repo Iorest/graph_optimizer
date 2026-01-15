@@ -40,7 +40,7 @@ BLOCKING_OPS = {
 }
 
 
-@PassRegistry.register("pack_hoisting", opt_level=3, priority=30)
+@PassRegistry.register("pack_hoisting", opt_level=3, priority=60)
 class PackHoisting(PatternRewritePass):
     """
     Pack hoisting optimization pass.

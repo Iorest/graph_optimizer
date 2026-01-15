@@ -424,6 +424,122 @@ class TestCSE(unittest.TestCase):
         self.assertIn("short", optimizer.nodes)
         self.assertNotIn("very_long_name_1", optimizer.nodes)
         self.assertNotIn("very_long_name_2", optimizer.nodes)
+    
+    def test_skip_stateful_ops(self):
+        """Test 17: Stateful operations should never be deduplicated."""
+        nodes = [
+            self._make_placeholder("input", tf.float32),
+            # Random ops (stateful - each call returns different results)
+            create_node("RandomUniform", "rand_1", inputs=["input"], attr={
+                "dtype": self._make_dtype_attr(tf.float32),
+                "seed": attr_value_pb2.AttrValue(i=42)
+            }),
+            create_node("RandomUniform", "rand_2", inputs=["input"], attr={
+                "dtype": self._make_dtype_attr(tf.float32),
+                "seed": attr_value_pb2.AttrValue(i=42)  # Same seed but still shouldn't merge
+            }),
+            # Print ops (side effects)
+            create_node("Print", "print_1", inputs=["input", "input"]),
+            create_node("Print", "print_2", inputs=["input", "input"]),  # Same inputs but has side effects
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should NOT eliminate any stateful ops
+        self.assertEqual(final_count, initial_count)
+        self.assertIn("rand_1", optimizer.nodes)
+        self.assertIn("rand_2", optimizer.nodes)
+        self.assertIn("print_1", optimizer.nodes)
+        self.assertIn("print_2", optimizer.nodes)
+    
+    def test_skip_variable_read_ops(self):
+        """Test 18: Variable read operations should not be deduplicated."""
+        nodes = [
+            # TF2.x style variables
+            create_node("VarHandleOp", "var", attr={
+                "dtype": self._make_dtype_attr(tf.float32),
+                "shape": attr_value_pb2.AttrValue(shape=tf.TensorShape([10]).as_proto())
+            }),
+            # Multiple reads from same variable (each read might see different values)
+            create_node("ReadVariableOp", "read_1", inputs=["var"], attr={
+                "dtype": self._make_dtype_attr(tf.float32)
+            }),
+            create_node("ReadVariableOp", "read_2", inputs=["var"], attr={
+                "dtype": self._make_dtype_attr(tf.float32)
+            }),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should NOT eliminate variable read ops (variable may change between reads)
+        self.assertEqual(final_count, initial_count)
+        self.assertIn("read_1", optimizer.nodes)
+        self.assertIn("read_2", optimizer.nodes)
+    
+    def test_skip_control_flow_ops(self):
+        """Test 19: Control flow operations should not be deduplicated."""
+        nodes = [
+            self._make_placeholder("pred", tf.bool),
+            self._make_placeholder("data", tf.float32),
+            # Switch nodes with same inputs but in different control flow contexts
+            create_node("Switch", "switch_1", inputs=["data", "pred"]),
+            create_node("Switch", "switch_2", inputs=["data", "pred"]),
+            # Merge nodes
+            create_node("Merge", "merge_1", inputs=["switch_1:0", "switch_1:1"]),
+            create_node("Merge", "merge_2", inputs=["switch_2:0", "switch_2:1"]),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should NOT eliminate control flow ops
+        self.assertEqual(final_count, initial_count)
+        self.assertIn("switch_1", optimizer.nodes)
+        self.assertIn("switch_2", optimizer.nodes)
+        self.assertIn("merge_1", optimizer.nodes)
+        self.assertIn("merge_2", optimizer.nodes)
+    
+    def test_different_control_dependencies(self):
+        """Test 20: Nodes with different control dependencies should NOT be merged."""
+        nodes = [
+            self._make_placeholder("input", tf.float32),
+            self._make_const("w", 1.0, tf.float32),
+            create_node("NoOp", "ctrl_1"),
+            create_node("NoOp", "ctrl_2"),
+            # Same op and data inputs, but different control dependencies
+            create_node("Add", "add_1", inputs=["input", "w", "^ctrl_1"]),
+            create_node("Add", "add_2", inputs=["input", "w", "^ctrl_2"]),
+        ]
+        
+        graph_def = self.create_graph(nodes)
+        optimizer = GraphOptimizer(graph_def)
+        cse_pass = CommonSubexpressionElimination()
+        
+        initial_count = len(optimizer.nodes)
+        cse_pass.transform(optimizer)
+        final_count = len(optimizer.nodes)
+        
+        # Should NOT merge nodes with different control dependencies
+        self.assertEqual(final_count, initial_count)
+        self.assertIn("add_1", optimizer.nodes)
+        self.assertIn("add_2", optimizer.nodes)
 
 
 if __name__ == "__main__":

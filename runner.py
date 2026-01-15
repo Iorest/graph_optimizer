@@ -319,7 +319,8 @@ class OptimizationPipeline:
         self._execute_main_passes(optimizer)
         
         # Run final cleanup passes after all main passes are done
-        if self.cleanup_passes:
+        # Only run if run_cleanup_between_passes is True
+        if self.run_cleanup_between_passes and self.cleanup_passes:
             custom_logger.info(f"Running final cleanup passes: {self.cleanup_passes}")
             self._run_cleanup_passes(optimizer, step_num=len(self.resolved_passes) + 1, is_final=True)
         

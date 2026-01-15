@@ -76,7 +76,6 @@ def main():
         debug=True,                          # Enable debug mode (dump intermediate graphs)
         output_nodes=["predicts"],  # Graph output nodes (protected from pruning)
         protected_nodes=["compile_batch_size_ret"],          # Nodes to protect from pruning
-        run_cleanup_between_passes = True,
         # remove_passes=["common_subexpression_elimination"],
         # Optional parameters (not used in this demo):
         # passes=None,                       # Explicit list of passes (overrides level)

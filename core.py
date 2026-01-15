@@ -1171,7 +1171,8 @@ class BasePass:
             if node.op in skip_ops:
                 continue
             
-            signature = self.create_node_signature(node, sort_inputs=False)
+            # 创建签名时保留控制依赖标记（对于CSE很重要）
+            signature = self._create_cse_signature(node)
             nodes_by_signature[signature].append(node.name)
         
         # 构建去重映射
@@ -1189,6 +1190,44 @@ class BasePass:
                     dedup_map[node_name] = canonical
         
         return dedup_map
+    
+    def _create_cse_signature(self, node):
+        """
+        为 CSE 创建节点签名，保留控制依赖标记。
+        
+        与 create_node_signature 的区别：
+        - create_node_signature: 去除端口和控制依赖标记，用于一般模式匹配
+        - _create_cse_signature: 保留控制依赖标记，用于 CSE 精确去重
+        
+        这样可以区分：
+        - Add(a, b) 和 Add(a, b, ^ctrl) 是不同的节点
+        - Add(a, b, ^ctrl1) 和 Add(a, b, ^ctrl2) 是不同的节点
+        
+        Args:
+            node: tf.NodeDef 节点
+            
+        Returns:
+            tuple: (op_type, inputs_tuple_with_ctrl_deps, key_attrs)
+        """
+        # 对于每个输入，只去除端口后缀，保留控制依赖前缀
+        cleaned_inputs = []
+        for inp in node.input:
+            # 保留控制依赖前缀 ^
+            if inp.startswith('^'):
+                cleaned_inputs.append(inp)  # 保留 ^node
+            elif ':' in inp:
+                base_name = inp.split(':', 1)[0]  # 去除端口
+                cleaned_inputs.append(base_name)
+            else:
+                cleaned_inputs.append(inp)
+        
+        # 输入保持原始顺序（不排序）
+        inputs_tuple = tuple(cleaned_inputs)
+        
+        # 提取关键属性
+        key_attrs = self.extract_key_attrs(node.attr, op_type=node.op)
+        
+        return (node.op, inputs_tuple, key_attrs)
     
     def apply_deduplication_map(self, optimizer, dedup_map):
         """
