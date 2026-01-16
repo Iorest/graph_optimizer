@@ -58,8 +58,8 @@ def main():
     output_path = "demos/graph_def_rankmixer_optimized.pb"
 
     # Generate the complex graph
-    # print(f"Generating graph to {input_path}...")
-    # create_complex_concat_graph(input_path)
+    print(f"Generating graph to {input_path}...")
+    create_complex_concat_graph(input_path)
 
     # 2. Evaluate original graph
     print("Evaluating original graph...")
