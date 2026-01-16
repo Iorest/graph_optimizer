@@ -70,7 +70,7 @@ class CommonSubexpressionElimination(BasePass):
     
     def __init__(self):
         super().__init__(
-            name="COMMON_SUBEXPRESSION_ELIMINATION",
+            name="common_subexpression_elimination",
             optimizer_alias="cse"
         )
         # 不应去重的操作类型
@@ -127,7 +127,7 @@ class CommonSubexpressionElimination(BasePass):
         import time
         from ..utils import save_graph
         
-        logging.info(f"[{self.name}] Starting graph optimization pass (iterative until convergence)...")
+        logging.info(f"[{self.name}] Starting (iterative until convergence)...")
         original_node_count = len(optimizer.nodes)
         start_time = time.time()
         
@@ -138,72 +138,53 @@ class CommonSubexpressionElimination(BasePass):
         # 准备受保护节点集合
         protected_set = set(protected_nodes or [])
         
-        # 迭代执行直到没有新的重复节点
+        # Iterate until no more duplicates
         while True:
             iteration += 1
             
-            # 检查迭代次数限制
+            # Check iteration limit
             if iteration > max_iterations:
                 logging.warning(
-                    f"[{self.name}] Reached maximum iterations ({max_iterations}). "
-                    f"Stopping to prevent infinite loop."
+                    f"[{self.name}] Reached maximum iterations ({max_iterations}), stopping"
                 )
                 break
             
             current_node_count = len(optimizer.nodes)
             
-            logging.info(f"[{self.name}] Iteration {iteration}: scanning {current_node_count} nodes...")
+            logging.debug(f"[{self.name}] Iteration {iteration}: scanning {current_node_count} nodes")
             
-            # 构建去重映射
+            # Build deduplication map
             dedup_map = self.build_deduplication_map(optimizer, self.skip_ops, protected_set)
             
             if not dedup_map:
-                logging.info(f"[{self.name}] Iteration {iteration}: no duplicates found, converged.")
+                logging.debug(f"[{self.name}] Iteration {iteration}: no duplicates found, converged")
                 break
             
             dedup_count = len(dedup_map)
             total_removed += dedup_count
+            # INFO: 找到的 pattern 数量
             logging.info(f"[{self.name}] Iteration {iteration}: found {dedup_count} duplicate nodes")
             
-            # 显示一些示例（仅在第一次迭代或有显著发现时）
-            if iteration == 1 or dedup_count > 10:
-                sample_size = min(3, dedup_count)
-                sample_items = list(dedup_map.items())[:sample_size]
-                for dup_name, canonical_name in sample_items:
-                    dup_node = optimizer.nodes.get(dup_name)
-                    if dup_node:
-                        logging.info(
-                            f"[{self.name}]   {dup_name} (op: {dup_node.op}) -> {canonical_name}"
-                        )
-                
-                if dedup_count > sample_size:
-                    logging.info(f"[{self.name}]   ... and {dedup_count - sample_size} more")
-            
-            # 应用去重映射
+            # Apply deduplication map
             self.apply_deduplication_map(optimizer, dedup_map)
         
-        # 报告最终结果
+        # Report final results
         final_node_count = len(optimizer.nodes)
         duration = time.time() - start_time
         
-        if total_removed > 0:
-            logging.info(
-                f"[{self.name}] Optimization finished in {duration:.3f}s after {iteration} iterations. "
-                f"Nodes: {original_node_count} -> {final_node_count} "
-                f"(removed {total_removed} duplicates)"
-            )
-        else:
-            logging.info(
-                f"[{self.name}] Optimization finished in {duration:.3f}s. "
-                f"Nodes: {original_node_count} -> {final_node_count} (no duplicates found)"
-            )
+        logging.info(
+            f"[{self.name}] Completed in {duration:.3f}s ({iteration} iterations). "
+            f"Nodes: {original_node_count} -> {final_node_count} "
+            f"(removed {total_removed} duplicates)"
+        )
         
-        # 保存调试信息（如果需要）
+        # Save debug info if needed
         if debug_dir and step is not None:
             import os
             filename = f"{step:02d}_{self.name}.pb"
             file_path = os.path.join(debug_dir, filename)
             save_graph(optimizer.graph_def, file_path)
+            logging.debug(f"[{self.name}] Saved debug graph to {file_path}")
         
         # 返回 GraphDef（与其他 Pass 保持一致）
         return optimizer.graph_def

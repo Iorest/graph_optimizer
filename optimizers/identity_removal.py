@@ -1,5 +1,6 @@
 from ..core import Any, PassRegistry, PatternRewritePass, Op
 from ..utils import create_node
+from ..utils.logger import logger as logging
 
 
 @PassRegistry.register("identity_removal", opt_level=1, priority=10)
@@ -27,5 +28,6 @@ class IdentityRemovalPass(PatternRewritePass):
     def _remove_identity(self, match, optimizer):
         root = match.matched_nodes["root"]
         x = match.matched_nodes["x"]
+        logging.info(f"[IdentityRemoval] Removing nested Identity: {root.name}")
         new_node = create_node("Identity", root.name, inputs=[x.name], attr=root.attr)
         return [new_node]

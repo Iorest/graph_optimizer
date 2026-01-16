@@ -35,21 +35,19 @@ def trace_transformation(func):
 
     @functools.wraps(func)
     def wrapper(match, optimizer, *args, **kwargs):
-        # We assume the first arg is typically the match object
         start_time = time.time()
         result = func(match, optimizer, *args, **kwargs)
         duration = (time.time() - start_time) * 1000
         
         # Only log when optimization actually happened (result is not None)
         if result:
-            logger.info(f"Executing rewriter: {func.__name__}")
             # Handle both list format and RewriteResult format
             node_count = len(result.new_nodes) if hasattr(result, 'new_nodes') else len(result)
+            # Get anchor node name from match context
+            anchor_name = next(iter(match.all_matched_nodes), "unknown") if match.all_matched_nodes else "unknown"
             logger.info(
-                f"Rewriter {func.__name__} generated {node_count} nodes ({duration:.2f}ms)"
+                f"Rewriter {func.__name__} matched at {anchor_name}, generated {node_count} nodes ({duration:.2f}ms)"
             )
-        else:
-            logger.debug(f"Rewriter {func.__name__} returned None")
         return result
 
     return wrapper
@@ -65,8 +63,9 @@ def log_optimization(func):
             pass_name = args[0]
 
         prefix = f"[{pass_name}] " if pass_name else ""
-        logger.info(f"{prefix}Starting graph optimization pass...")
-        original_node_count = len(self.nodes)
+        # 使用 graph_def.node 获取真实节点数，避免 self.nodes 未同步的问题
+        original_node_count = len(self.graph_def.node)
+        logger.info(f"{prefix}Starting graph optimization pass... ({original_node_count} nodes)")
         start_time = time.time()
 
         result_graph = func(self, *args, **kwargs)

@@ -9,9 +9,9 @@ import tensorflow.compat.v1 as tf
 import numpy as np
 from graph_optimizer.utils import load_graph, create_node, create_complex_concat_graph
 from graph_optimizer.runner import OptimizationPipeline
-from graph_optimizer.utils.logger import set_log_level, DEBUG
+from graph_optimizer.utils.logger import set_log_level, DEBUG, INFO
 tf.disable_v2_behavior()
-set_log_level(DEBUG)
+set_log_level(INFO)
 
 def evaluate_graph(graph_def, output_node_names):
     """Run the graph and return outputs."""

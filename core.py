@@ -207,6 +207,9 @@ class GraphOptimizer:
                                             existing.add(ci)
 
                             new_nodes.extend(result.new_nodes)
+                            # DEBUG: 记录每个新增的节点
+                            for new_node in result.new_nodes:
+                                logging.debug(f"Added node: {new_node.name} (op: {new_node.op})")
                             replaced_node_names.add(node.name)
                             
                             # Collect node mappings from this rewrite
@@ -228,7 +231,7 @@ class GraphOptimizer:
                                         if name not in [n for n, _ in nodes_with_ext_consumers]
                                     ]
                                     replaced_node_names.update(safe_to_replace)
-                                    logging.info(
+                                    logging.debug(
                                         f"Marked {len(safe_to_replace)}/{len(result.replaced_nodes)} nodes as replaced "
                                         f"(skipped {len(nodes_with_ext_consumers)} with external consumers)"
                                     )
@@ -243,9 +246,11 @@ class GraphOptimizer:
                     new_nodes.append(node)
 
             if modified:
+                nodes_before_iteration = len(current_graph_def.node)
+                
                 # Apply node mappings to update all consumer references
                 if global_node_mapping:
-                    logging.info(f"Applying node mapping: {len(global_node_mapping)} remappings")
+                    logging.debug(f"Applying node mapping: {len(global_node_mapping)} remappings")
                     for node in new_nodes:
                         self._update_node_inputs(node, global_node_mapping)
                 
@@ -257,12 +262,29 @@ class GraphOptimizer:
                     )
                 else:
                     current_graph_def = next_graph_def
+                
+                # INFO: 每次迭代的节点数变化
+                nodes_after_iteration = len(current_graph_def.node)
+                node_diff = nodes_before_iteration - nodes_after_iteration
+                prefix = f"[{pass_name}] " if pass_name else ""
+                logging.info(
+                    f"{prefix}Iteration {iteration}: {nodes_before_iteration} -> {nodes_after_iteration} nodes "
+                    f"(-{node_diff})"
+                )
 
         # Final cleanup
         if auto_cleanup:
+            nodes_before_final = len(current_graph_def.node)
             current_graph_def = self._final_prune(
                 current_graph_def, pass_name, protected_nodes
             )
+            nodes_after_final = len(current_graph_def.node)
+            if nodes_before_final != nodes_after_final:
+                prefix = f"[{pass_name}] " if pass_name else ""
+                logging.info(
+                    f"{prefix}Final cleanup: {nodes_before_final} -> {nodes_after_final} nodes "
+                    f"(-{nodes_before_final - nodes_after_final})"
+                )
 
         return current_graph_def
 
@@ -321,14 +343,12 @@ class GraphOptimizer:
                 # No more dead nodes to remove
                 break
             
-            logging.info(
+            logging.debug(
                 f"[{pass_name or 'optimize'}] Final pruning iteration {iteration + 1}: "
-                f"removing {len(dead_nodes)} dead nodes: "
-                f"{', '.join(list(dead_nodes)[:5])}"
-                + (f" and {len(dead_nodes) - 5} more..." if len(dead_nodes) > 5 else "")
+                f"removing {len(dead_nodes)} dead nodes"
             )
             
-            graph_def = self._remove_nodes(graph_def, dead_nodes)
+            graph_def = self._remove_nodes(graph_def, dead_nodes, pass_name, "dead node, ref_count=0")
             iteration += 1
         
         if iteration >= max_iterations:
@@ -336,7 +356,7 @@ class GraphOptimizer:
                 f"[{pass_name or 'optimize'}] Final pruning reached max iterations ({max_iterations})"
             )
         elif iteration > 0:
-            logging.info(
+            logging.debug(
                 f"[{pass_name or 'optimize'}] Final pruning completed in {iteration} iteration(s)"
             )
         
@@ -363,24 +383,24 @@ class GraphOptimizer:
                     dead_nodes.add(node.name)
 
         if dead_nodes:
-            logging.info(
-                f"[{pass_name or 'optimize'}] Pruning {len(dead_nodes)} dead nodes: "
-                f"{', '.join(sorted(list(dead_nodes)[:5]))}"
-                + (f" and {len(dead_nodes) - 5} more..." if len(dead_nodes) > 5 else "")
+            logging.debug(
+                f"[{pass_name or 'optimize'}] Pruning {len(dead_nodes)} dead nodes"
             )
-            return self._remove_nodes(graph_def, dead_nodes)
+            return self._remove_nodes(graph_def, dead_nodes, pass_name, "dead node, ref_count=0")
         
         return graph_def
     
-    def _remove_nodes(self, graph_def, nodes_to_remove):
+    def _remove_nodes(self, graph_def, nodes_to_remove, pass_name=None, reason=None):
         """Create new GraphDef without specified nodes."""
         pruned_graph_def = tf.GraphDef()
         for node in graph_def.node:
             if node.name not in nodes_to_remove:
                 pruned_graph_def.node.add().CopyFrom(node)
-            else:
-                # 为每个被删除的节点添加日志
-                logging.debug(f"[GraphOptimizer] Removing node: {node.name} (op: {node.op})")
+        # DEBUG: 记录每个被删除的节点
+        prefix = f"[{pass_name}] " if pass_name else ""
+        reason_str = f" ({reason})" if reason else ""
+        for node_name in nodes_to_remove:
+            logging.debug(f"{prefix}Removed node: {node_name}{reason_str}")
         return pruned_graph_def
 
     def canonicalize_axis(self, axis, rank):
@@ -1117,14 +1137,13 @@ class BasePass:
         key_attrs = self.extract_key_attrs(attrs, op_type=op_type)
         node_signature = (op_type, inputs_tuple, key_attrs)
         
-        # 检查缓存
+        # Check cache
         if node_signature in self._node_cache:
             cached_name = self._node_cache[node_signature]
-            if context_desc:
-                logging.info(f"[{self.name}] {context_desc}: REUSING cached {op_type} node {cached_name}")
+            logging.debug(f"[{self.name}] Cache hit: reusing {op_type} node {cached_name}")
             return cached_name, False, None
         
-        # 创建新节点
+        # Create new node
         new_name = self.make_unique_node_name(root_node_name, op_type)
         
         if create_func:
@@ -1132,10 +1151,9 @@ class BasePass:
         else:
             new_node = create_node(op_type, new_name, inputs=inputs, attr=attrs)
         
-        # 缓存节点
+        # Cache node
         self._node_cache[node_signature] = new_name
-        if context_desc:
-            logging.debug(f"[{self.name}] {context_desc}: created new {op_type} node {new_name}")
+        logging.debug(f"[{self.name}] Created new {op_type} node: {new_name}")
         
         return new_name, True, new_node
     
@@ -1290,13 +1308,15 @@ class BasePass:
             del node.input[:]
             node.input.extend(new_inputs)
         
-        # 删除重复节点（为每个节点添加日志）
-        for node in optimizer.graph_def.node:
-            if node.name in removed_nodes:
-                canonical = dedup_map[node.name]
-                logging.info(f"[{self.name}] Removing duplicate node: {node.name} (op: {node.op}) -> keeping {canonical}")
-        
+        # Delete duplicate nodes
         new_nodes = [n for n in optimizer.graph_def.node if n.name not in removed_nodes]
+        
+        if removed_nodes:
+            logging.debug(f"[{self.name}] Removed {len(removed_nodes)} duplicate nodes")
+            for node_name in removed_nodes:
+                canonical = dedup_map.get(node_name, "unknown")
+                logging.debug(f"[{self.name}] Removed node: {node_name} (duplicate of {canonical})")
+        
         del optimizer.graph_def.node[:]
         optimizer.graph_def.node.extend(new_nodes)
         

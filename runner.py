@@ -138,7 +138,7 @@ class OptimizationPipeline:
         """Determines the final list of passes to execute."""
         if self.passes:
             final_passes = list(self.passes)
-            custom_logger.info(f"Using explicit pass list: {final_passes}")
+            custom_logger.debug(f"Using explicit pass list: {final_passes}")
         else:
             final_passes = PassRegistry.get_passes_by_level(self.level)
             custom_logger.info(
@@ -148,15 +148,15 @@ class OptimizationPipeline:
             for p in self.add_passes:
                 if p not in final_passes:
                     final_passes.append(p)
-                    custom_logger.info(f"Added pass: {p}")
+                    custom_logger.debug(f"Added pass: {p}")
 
             for p in self.remove_passes:
                 if p in final_passes:
                     final_passes.remove(p)
-                    custom_logger.info(f"Removed pass: {p}")
+                    custom_logger.debug(f"Removed pass: {p}")
                 else:
                     custom_logger.warning(
-                        f"Pass '{p}' in remove_passes was not in the list."
+                        f"Pass '{p}' in remove_passes was not in the list"
                     )
 
         # Priority sorting is handled by get_passes_by_level, but added passes might not be sorted.
@@ -199,7 +199,7 @@ class OptimizationPipeline:
             
             try:
                 cleanup_instance = PassRegistry.get_pass(cleanup_pass_name)
-                custom_logger.info(
+                custom_logger.debug(
                     f"Running cleanup pass '{cleanup_pass_name}' {context}..."
                 )
                 
@@ -290,7 +290,7 @@ class OptimizationPipeline:
 
         # Priority: graph_def > input_graph
         if self.graph_def is not None:
-            custom_logger.info("Using provided graph_def object")
+            custom_logger.debug("Using provided graph_def object")
             graph_def = self.graph_def
         elif self.input_graph:
             custom_logger.info(f"Loading graph from {self.input_graph}")
@@ -310,10 +310,10 @@ class OptimizationPipeline:
                 optimizer.graph_def, os.path.join(self.debug_dir, "00_initial.pb")
             )
 
-        custom_logger.info(f"Applying passes: {self.resolved_passes}")
+        custom_logger.info(f"Applying {len(self.resolved_passes)} passes: {self.resolved_passes}")
         
         if self.run_cleanup_between_passes:
-            custom_logger.info(f"Cleanup passes will run between main passes: {self.cleanup_passes}")
+            custom_logger.debug(f"Cleanup passes between main passes: {self.cleanup_passes}")
         
         # Execute all main optimization passes
         self._execute_main_passes(optimizer)
@@ -321,7 +321,7 @@ class OptimizationPipeline:
         # Run final cleanup passes after all main passes are done
         # Only run if run_cleanup_between_passes is True
         if self.run_cleanup_between_passes and self.cleanup_passes:
-            custom_logger.info(f"Running final cleanup passes: {self.cleanup_passes}")
+            custom_logger.debug(f"Running final cleanup passes: {self.cleanup_passes}")
             self._run_cleanup_passes(optimizer, step_num=len(self.resolved_passes) + 1, is_final=True)
         
         if self.output_graph:
@@ -331,5 +331,5 @@ class OptimizationPipeline:
         if self.debug_dir:
             save_graph(optimizer.graph_def, os.path.join(self.debug_dir, "final.pb"))
 
-        custom_logger.info("Optimization completed successfully.")
+        custom_logger.info(f"Optimization completed. Final node count: {len(optimizer.nodes)}")
         return optimizer.graph_def

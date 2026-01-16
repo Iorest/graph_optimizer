@@ -67,10 +67,9 @@ class PackHoisting(PatternRewritePass):
         
         # Skip if Pack has < 2 inputs
         if len(pack_inputs) < 2:
-            logging.debug(f"Pack {pack_node.name}: skipped (< 2 inputs)")
             return None
         
-        logging.debug(f"Analyzing Pack node: {pack_node.name} with {len(pack_inputs)} inputs")
+        logging.debug(f"[PackHoisting] Analyzing {pack_node.name} ({len(pack_inputs)} inputs)")
         
         # Try to hoist the pack (with recursive hoisting until can't continue)
         result = self._try_hoist_pack_recursive(pack_node, pack_inputs, optimizer)
@@ -78,7 +77,7 @@ class PackHoisting(PatternRewritePass):
         if result:
             hoist_path = result['hoist_path']
             hoist_desc = " -> ".join(hoist_path) if hoist_path else "eliminated"
-            logging.info(f"[PACK_HOISTING] Pack {pack_node.name}: fully hoisted ({len(hoist_path)} layers: {hoist_desc})")
+            logging.info(f"[PackHoisting] Hoisted: {pack_node.name} ({len(hoist_path)} layers: {hoist_desc})")
             
             # Return RewriteResult with replaced_nodes and node_mapping if specified
             if 'replaced_nodes' in result or 'node_mapping' in result:
@@ -103,14 +102,12 @@ class PackHoisting(PatternRewritePass):
         
         # Check if all branches are the same operation
         if not self._all_same_op(branches):
-            logging.debug(f"Pack {pack_node.name}: branches have different ops")
             return None
         
         first_op = branches[0].op
         
         # Check if operation is hoistable
         if first_op in BLOCKING_OPS or first_op not in HOISTABLE_OPS:
-            logging.debug(f"Pack {pack_node.name}: op {first_op} not hoistable")
             return None
         
         # Try elimination first (preferred)
@@ -201,10 +198,9 @@ class PackHoisting(PatternRewritePass):
         
         # Verify operations can be batched (same weights/biases)
         if not self._can_batch_operations(branches, optimizer):
-            logging.debug(f"Pack {pack_node.name}: operations cannot be batched (different parameters)")
             return None
         
-        logging.info(f"[PACK_HOISTING] Pack {pack_node.name}: can eliminate with {split_sources[0]['type']}")
+        logging.debug(f"[PackHoisting] {pack_node.name}: can eliminate with {split_sources[0]['type']}")
         return self._generate_batched_ops(pack_node, branches, common_source, optimizer)
     
     def _get_common_source(self, split_sources):
@@ -219,7 +215,6 @@ class PackHoisting(PatternRewritePass):
                 elif split_node['type'] == 'Split':
                     # Split: input[0] is split_dim, input[1] is the value to split
                     if len(split_node['node'].input) < 2:
-                        logging.debug(f"Split node {split_node['node'].name} has insufficient inputs: {len(split_node['node'].input)}")
                         return None
                     source = self.clean_input_name(split_node['node'].input[1])
                 else:
@@ -230,7 +225,7 @@ class PackHoisting(PatternRewritePass):
                 elif common_source != source:
                     return None
             except (AttributeError, TypeError, KeyError) as e:
-                logging.warning(f"Error extracting source from split_node: {e}, split_node={split_node}")
+                logging.warning(f"[PackHoisting] Error extracting source: {e}")
                 return None
         
         return common_source
@@ -258,7 +253,6 @@ class PackHoisting(PatternRewritePass):
                     inp_node = optimizer.nodes.get(inp_name)
                     if inp_node and inp_node.op not in ('StridedSlice', 'Split', 'SplitV'):
                         if not self._find_split_or_slice(inp_node, optimizer, max_depth=20):
-                            logging.debug(f"Cannot batch: input {input_idx} differs ({inp_name})")
                             return False
         
         return True
@@ -290,7 +284,6 @@ class PackHoisting(PatternRewritePass):
         if op_type in ELEMENTWISE_OPS:
             return True
         
-        logging.debug(f"Pack {pack_node.name}: uncertain dimension compatibility for {op_type}")
         return False
     
     def _update_output_shape_for_hoisted_op(self, hoisted_op, pack_node, branches, op_type):
@@ -366,7 +359,6 @@ class PackHoisting(PatternRewritePass):
         Transform: Pack([Op(x1, w), Op(x2, w), ...]) -> Op(Pack([x1, x2, ...]), w)
         """
         if not self._check_dimension_compatibility(op_type, pack_node, branches):
-            logging.debug(f"Pack {pack_node.name}: {op_type} not dimension-compatible")
             return None
         
         num_inputs = len(branches[0].input)
@@ -380,7 +372,6 @@ class PackHoisting(PatternRewritePass):
                     inp = self.clean_input_name(branch.input[input_idx])
                     inputs_at_idx.append(inp)
                 else:
-                    logging.debug(f"Pack {pack_node.name}: branches have different input counts")
                     return None
             
             if len(set(inputs_at_idx)) == 1:
@@ -390,7 +381,6 @@ class PackHoisting(PatternRewritePass):
         
         # Check if hoisting is beneficial
         if len(branches) <= len(data_inputs) + 1:
-            logging.debug(f"Pack {pack_node.name}: skipping hoist - not beneficial")
             return None
         
         # Create Pack nodes for data inputs (with caching to avoid duplicates)
@@ -398,13 +388,13 @@ class PackHoisting(PatternRewritePass):
         hoisted_inputs = [''] * num_inputs
         
         for pack_idx, (data_input_idx, data_input_names) in enumerate(data_inputs):
-            # 使用统一的缓存接口
+            # Use unified cache interface
             pack_name, is_new, new_pack_node = self.get_or_create_cached_node(
                 "Pack",
                 data_input_names,
                 pack_node.attr,
                 pack_node.name,
-                f"Hoisting Pack {pack_node.name}"
+                ""
             )
             
             hoisted_inputs[data_input_idx] = pack_name
@@ -468,7 +458,7 @@ class PackHoisting(PatternRewritePass):
                 new_name,
                 inputs=[common_source]
             )
-            logging.info(f"[PACK_HOISTING] Pack {pack_node.name}: eliminated (direct connection)")
+            logging.debug(f"[PackHoisting] {pack_node.name}: eliminated (direct connection)")
             return {
                 'hoist_path': ['eliminated'],
                 'new_nodes': [identity_node]
@@ -476,13 +466,13 @@ class PackHoisting(PatternRewritePass):
         
         path_length = len(all_paths[0])
         if not all(len(p) == path_length for p in all_paths):
-            logging.warning(f"Pack {pack_node.name}: branches have different path lengths")
+            logging.warning(f"[PackHoisting] {pack_node.name}: branches have different path lengths")
             return None
         
         for i in range(path_length):
             ops_at_level = [p[i].op for p in all_paths]
             if not all(op == ops_at_level[0] for op in ops_at_level):
-                logging.warning(f"Pack {pack_node.name}: branches have different ops at level {i}")
+                logging.warning(f"[PackHoisting] {pack_node.name}: different ops at level {i}")
                 return None
         
         new_nodes = []
@@ -492,7 +482,7 @@ class PackHoisting(PatternRewritePass):
             ops_at_level = [p[level_idx] for p in all_paths]
             first_op = ops_at_level[0]
             
-            # 用于去重：记录已经处理过的共享输入节点 -> 实际使用的节点名
+            # For dedup: track processed shared inputs -> actual node name
             seen_shared_inputs = {}
             batched_inputs = []
             
@@ -503,7 +493,7 @@ class PackHoisting(PatternRewritePass):
                         inp = self.clean_input_name(op.input[inp_idx])
                         inputs_at_position.append(inp)
                     else:
-                        logging.warning(f"Pack {pack_node.name}: input count mismatch at level {level_idx}")
+                        logging.warning(f"[PackHoisting] {pack_node.name}: input count mismatch at level {level_idx}")
                         return None
                 
                 unique_inputs = set(inputs_at_position)
@@ -511,42 +501,39 @@ class PackHoisting(PatternRewritePass):
                 if len(unique_inputs) == 1:
                     shared_input_name = inputs_at_position[0]
                     
-                    # 检查这个共享输入是否已经被处理过（去重）
+                    # Check if this shared input has been processed (dedup)
                     if shared_input_name in seen_shared_inputs:
-                        # 复用已经处理过的节点名
+                        # Reuse already processed node name
                         batched_inputs.append(seen_shared_inputs[shared_input_name])
-                        logging.debug(f"Pack {pack_node.name} level {level_idx}: REUSING input {shared_input_name} at position {inp_idx}")
                     elif shared_input_name in batched_node_map:
-                        # 使用批处理后的版本
+                        # Use batched version
                         mapped_name = batched_node_map[shared_input_name]
                         batched_inputs.append(mapped_name)
                         seen_shared_inputs[shared_input_name] = mapped_name
-                        logging.debug(f"Pack {pack_node.name} level {level_idx} pos {inp_idx}: using batched {mapped_name} for {shared_input_name}")
                     else:
-                        # 使用原始输入
+                        # Use original input
                         batched_inputs.append(first_op.input[inp_idx])
                         seen_shared_inputs[shared_input_name] = first_op.input[inp_idx]
-                        logging.debug(f"Pack {pack_node.name} level {level_idx} pos {inp_idx}: using original {first_op.input[inp_idx]}")
                 else:
-                    logging.warning(f"Pack {pack_node.name} level {level_idx} pos {inp_idx}: branches have different inputs {list(unique_inputs)[:3]}...")
+                    logging.debug(f"[PackHoisting] {pack_node.name}: different inputs at level {level_idx} pos {inp_idx}")
                     return None
             
-            # 提取关键属性（排除_output_shapes）
+            # Extract key attrs (exclude _output_shapes)
             batched_attr = {k: v for k, v in first_op.attr.items() if k != '_output_shapes'}
             
-            # 使用统一的缓存接口创建batch节点
+            # Use unified cache interface to create batch node
             batched_name, is_new, batched_node = self.get_or_create_cached_node(
                 first_op.op,
                 batched_inputs,
                 batched_attr,
                 pack_node.name,
-                f"Pack {pack_node.name} level {level_idx}"
+                ""
             )
             
             if is_new and batched_node:
                 new_nodes.append(batched_node)
             
-            # 更新映射
+            # Update mapping
             for op in ops_at_level:
                 batched_node_map[op.name] = batched_name
         new_name = self.make_unique_node_name(pack_node.name, 'Identity')
@@ -562,7 +549,7 @@ class PackHoisting(PatternRewritePass):
             for node in path:
                 old_branch_nodes.append(node.name)
         
-        logging.info(f"[PACK_HOISTING] Pack {pack_node.name}: eliminated with {path_length} batched ops")
+        logging.debug(f"[PackHoisting] {pack_node.name}: eliminated with {path_length} batched ops")
         
         return {
             'hoist_path': ['eliminated'],

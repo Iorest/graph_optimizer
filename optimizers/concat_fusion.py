@@ -28,7 +28,6 @@ class ConcatFusionPass(PatternRewritePass):
 
     def _fuse_concat(self, match, optimizer):
         root = match.matched_nodes["root"]
-        logging.debug(f"Found ConcatV2: {root.name}")
         axis_node = match.matched_nodes["axis"]
 
         root_rank = optimizer.get_node_rank(root)
@@ -46,7 +45,7 @@ class ConcatFusionPass(PatternRewritePass):
             if base_name in optimizer.nodes:
                 input_node = optimizer.nodes[base_name]
                 if input_node.op == "ConcatV2":
-                    logging.info(f"Found inner ConcatV2: {input_node.name}")
+                    logging.debug(f"[ConcatFusion] Found inner ConcatV2: {input_node.name}")
                     if len(input_node.input) < 2:
                         new_inputs.append(input_name)
                         continue
@@ -96,5 +95,5 @@ class ConcatFusionPass(PatternRewritePass):
         new_inputs.append(root.input[-1])
         new_node = create_node("ConcatV2", root.name, inputs=new_inputs, attr=root.attr)
         new_node.attr["N"].i = len(new_inputs) - 1
-        logging.info(f"Fused ConcatV2: {root.name} -> {new_node.name}")
+        logging.info(f"[ConcatFusion] Fused: {root.name} ({len(root.input)-1} -> {len(new_inputs)-1} inputs)")
         return [new_node]
