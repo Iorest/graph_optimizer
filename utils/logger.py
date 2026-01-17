@@ -45,8 +45,11 @@ def trace_transformation(func):
             node_count = len(result.new_nodes) if hasattr(result, 'new_nodes') else len(result)
             # Get anchor node name from match context
             anchor_name = next(iter(match.all_matched_nodes), "unknown") if match.all_matched_nodes else "unknown"
+            # Get pass name from optimizer
+            pass_name = getattr(optimizer, 'current_pass_name', None)
+            prefix = f"[{pass_name}] " if pass_name else ""
             logger.info(
-                f"Rewriter {func.__name__} matched at {anchor_name}, generated {node_count} nodes ({duration:.2f}ms)"
+                f"{prefix}Rewriter {func.__name__} matched at {anchor_name}, generated {node_count} nodes ({duration:.2f}ms)"
             )
         return result
 
@@ -88,7 +91,9 @@ def log_match(func):
     def wrapper(self, node, optimizer, context=None):
         res = func(self, node, optimizer, context)
         if res:
-            logger.debug(f"Matched pattern on node: {node.name} (Op: {node.op})")
+            pass_name = getattr(optimizer, 'current_pass_name', None)
+            prefix = f"[{pass_name}] " if pass_name else ""
+            logger.debug(f"{prefix}Matched pattern on node: {node.name} (Op: {node.op})")
         return res
 
     return wrapper

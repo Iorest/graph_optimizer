@@ -1,5 +1,6 @@
 import tensorflow.compat.v1 as tf
 import collections
+import time
 from typing import Dict, List, Set, Optional, Any as AnyType, Tuple, Union
 from .utils.logger import (
     logger as logging,
@@ -8,6 +9,216 @@ from .utils.logger import (
     log_match,
 )
 from .utils import save_graph
+from .utils.graph_utils import (
+    extract_base_name,
+    canonicalize_axis,
+    compute_reference_counts,
+    update_node_inputs,
+    remove_nodes,
+    prune_dead_nodes,
+    final_prune,
+    check_external_consumers,
+    log_external_consumer_warning,
+    build_consumer_index,
+)
+
+
+# =============================================================================
+# Optimization Context - Unified management for protected nodes, logging, 
+#                        iteration tracking, and statistics
+# =============================================================================
+
+class OptimizationContext:
+    """
+    Unified context for graph optimization operations.
+    
+    Manages:
+    - Protected nodes that should not be pruned or modified
+    - Optimization statistics collection
+    - Iteration tracking for convergence detection
+    - Unified logging with pass prefix
+    
+    This context is passed through the optimization pipeline to ensure
+    consistent behavior across all passes and operations.
+    """
+    
+    def __init__(
+        self,
+        protected_nodes: Optional[Set[str]] = None,
+        auto_cleanup: bool = True,
+        max_iterations: int = 100,
+        debug_dir: Optional[str] = None,
+    ):
+        """
+        Initialize optimization context.
+        
+        Args:
+            protected_nodes: Set of node names that should not be pruned/modified
+            auto_cleanup: Whether to automatically prune dead nodes
+            max_iterations: Maximum iterations for convergence (safety limit)
+            debug_dir: Optional directory to save intermediate graphs
+        """
+        self._protected_nodes: Set[str] = set(protected_nodes or [])
+        self.auto_cleanup = auto_cleanup
+        self.max_iterations = max_iterations
+        self.debug_dir = debug_dir
+        
+        # Current pass info
+        self._current_pass: Optional[str] = None
+        self._current_iteration: int = 0
+        
+        # Statistics (embedded, not a separate class)
+        self._pass_stats: Dict[str, dict] = {}
+        self._current_pass_start: Optional[float] = None
+    
+    # =========================================================================
+    # Protected Nodes Management
+    # =========================================================================
+    
+    @property
+    def protected_nodes(self) -> Set[str]:
+        """Get the set of protected nodes."""
+        return self._protected_nodes
+    
+    def add_protected(self, *node_names: str):
+        """Add nodes to the protected set."""
+        for name in node_names:
+            if name:
+                self._protected_nodes.add(name)
+    
+    def remove_protected(self, *node_names: str):
+        """Remove nodes from the protected set."""
+        for name in node_names:
+            self._protected_nodes.discard(name)
+    
+    def is_protected(self, node_name: str) -> bool:
+        """Check if a node is protected."""
+        return node_name in self._protected_nodes
+    
+    def clear_protected(self):
+        """Clear all protected nodes."""
+        self._protected_nodes.clear()
+    
+    # =========================================================================
+    # Pass & Iteration Management
+    # =========================================================================
+    
+    def begin_pass(self, pass_name: str):
+        """Mark the beginning of a pass."""
+        self._current_pass = pass_name
+        self._current_iteration = 0
+        self._current_pass_start = time.time()
+        if pass_name not in self._pass_stats:
+            self._pass_stats[pass_name] = {
+                "iterations": [],
+                "total_changes": 0,
+                "duration": 0.0,
+                "nodes_before": 0,
+                "nodes_after": 0,
+            }
+        logging.info(f"[{pass_name}] Starting...")
+    
+    def begin_iteration(self) -> int:
+        """Mark the beginning of an iteration, returns iteration number (1-based)."""
+        self._current_iteration += 1
+        return self._current_iteration
+    
+    def end_iteration(self, changes: int, nodes_before: int, nodes_after: int):
+        """Mark the end of an iteration with statistics."""
+        pass_name = self._current_pass
+        if pass_name and pass_name in self._pass_stats:
+            self._pass_stats[pass_name]["iterations"].append({
+                "iteration": self._current_iteration,
+                "changes": changes,
+                "nodes_before": nodes_before,
+                "nodes_after": nodes_after,
+            })
+            self._pass_stats[pass_name]["total_changes"] += changes
+            if self._current_iteration == 1:
+                self._pass_stats[pass_name]["nodes_before"] = nodes_before
+            self._pass_stats[pass_name]["nodes_after"] = nodes_after
+        
+        if changes > 0:
+            logging.info(
+                f"[{pass_name}] Iteration {self._current_iteration}: "
+                f"{changes} changes, {nodes_before} -> {nodes_after} nodes"
+            )
+        else:
+            logging.debug(f"[{pass_name}] Iteration {self._current_iteration}: converged")
+    
+    def end_pass(self, nodes_before: int, nodes_after: int):
+        """Mark the end of a pass with final statistics."""
+        pass_name = self._current_pass
+        duration = time.time() - (self._current_pass_start or time.time())
+        
+        if pass_name and pass_name in self._pass_stats:
+            self._pass_stats[pass_name]["duration"] = duration
+        
+        total_changes = self._pass_stats.get(pass_name, {}).get("total_changes", 0)
+        iterations = self._current_iteration
+        
+        logging.info(
+            f"[{pass_name}] Completed in {duration:.3f}s "
+            f"({iterations} iteration{'s' if iterations != 1 else ''}). "
+            f"Nodes: {nodes_before} -> {nodes_after} ({total_changes} changes)"
+        )
+        self._current_pass = None
+        self._current_iteration = 0
+        self._current_pass_start = None
+    
+    def warn_max_iterations(self):
+        """Log warning when max iterations reached."""
+        logging.warning(
+            f"[{self._current_pass}] Reached max iterations ({self.max_iterations})"
+        )
+    
+    @property
+    def current_pass(self) -> Optional[str]:
+        """Get current pass name."""
+        return self._current_pass
+    
+    @property
+    def current_iteration(self) -> int:
+        """Get current iteration number."""
+        return self._current_iteration
+    
+    # =========================================================================
+    # Logging Helpers
+    # =========================================================================
+    
+    def log_info(self, message: str):
+        """Log info with current pass prefix."""
+        prefix = f"[{self._current_pass}] " if self._current_pass else ""
+        logging.info(f"{prefix}{message}")
+    
+    def log_debug(self, message: str):
+        """Log debug with current pass prefix."""
+        prefix = f"[{self._current_pass}] " if self._current_pass else ""
+        logging.debug(f"{prefix}{message}")
+    
+    def log_warning(self, message: str):
+        """Log warning with current pass prefix."""
+        prefix = f"[{self._current_pass}] " if self._current_pass else ""
+        logging.warning(f"{prefix}{message}")
+    
+    # =========================================================================
+    # Statistics Access
+    # =========================================================================
+    
+    def get_pass_total_changes(self, pass_name: str) -> int:
+        """Get total changes for a pass."""
+        return self._pass_stats.get(pass_name, {}).get("total_changes", 0)
+    
+    def get_summary(self) -> str:
+        """Get summary of all optimization passes."""
+        lines = ["Optimization Summary:"]
+        for name, stats in self._pass_stats.items():
+            lines.append(
+                f"  {name}: {stats['nodes_before']} -> {stats['nodes_after']} nodes "
+                f"({stats['total_changes']} changes, {len(stats['iterations'])} iterations, "
+                f"{stats['duration']:.3f}s)"
+            )
+        return "\n".join(lines)
 
 
 class RewriteResult:
@@ -44,375 +255,38 @@ class RewriteResult:
 
 class GraphOptimizer:
     """
-    Main engine for applying optimization passes to a TensorFlow GraphDef.
-    Manages graph state, consumer indexing, and iterative pattern matching.
+    Graph state container, query context, and pattern-based optimizer.
+    
+    Responsibilities:
+    - Graph state management (graph_def, nodes dict, consumer index)
+    - Node query methods (get_node_attr, get_node_shape, etc.)
+    - Pattern registration and matching (via PatternMatcher)
+    - Dead node pruning (delegates to utils)
     """
 
     def __init__(self, graph_def: tf.GraphDef):
+        self._matcher = PatternMatcher()
         self.load_state(graph_def)
 
-        # Pattern indexing for O(1) lookup by op_type
-        self.pattern_index: Dict[str, List[Tuple["Pattern", AnyType]]] = (
-            collections.defaultdict(list)
-        )  # op_type -> [(pattern, rewriter)]
-        self.wildcard_patterns: List[
-            Tuple["Pattern", AnyType]
-        ] = []  # Patterns that match any op_type
-
+    # =========================================================================
+    # State Management
+    # =========================================================================
+    
     def load_state(self, graph_def: tf.GraphDef):
-        """Restore optimizer state from GraphDef and rebuild consumer index."""
+        """Load graph state and rebuild consumer index."""
         self.graph_def = graph_def
         self.nodes = {node.name: node for node in graph_def.node}
-        self._rebuild_consumer_index()
-
-    def add_transformation(self, pattern, rewriter):
-        """Adds a transformation rule (pattern -> rewriter)."""
-        logging.info(
-            f"Adding transformation: rule={rewriter.__name__} pattern={pattern}"
-        )
-
-        op_type = pattern.get_indexed_op_type()
-        if op_type is None:
-            self.wildcard_patterns.append((pattern, rewriter))
-        else:
-            self.pattern_index[op_type].append((pattern, rewriter))
-
-    def clear_transformations(self):
-        """Clear all registered transformations."""
-        self.pattern_index = collections.defaultdict(list)
-        self.wildcard_patterns = []
+        self.consumers = build_consumer_index(graph_def)
     
-    def _rebuild_consumer_index(self):
-        """Rebuild consumer index from current graph nodes."""
-        self.consumers = collections.defaultdict(list)
-        for node in self.graph_def.node:
-            for input_name in node.input:
-                base_name = input_name.split(":")[0].lstrip("^")
-                self.consumers[base_name].append(node.name)
+    def refresh_state(self):
+        """Refresh internal state from current graph_def (after in-place modifications)."""
+        self.nodes = {node.name: node for node in self.graph_def.node}
+        self.consumers = build_consumer_index(self.graph_def)
     
-    @staticmethod
-    def _extract_base_name(input_name: str) -> str:
-        """
-        Extract base node name from input (strip port and control marker).
-        
-        Examples:
-            'node:0' -> 'node'
-            '^control_dep' -> 'control_dep'
-            'node:1' -> 'node'
-            'node' -> 'node'
-        """
-        return input_name.split(":")[0].lstrip("^")
+    # =========================================================================
+    # Node Query Methods
+    # =========================================================================
     
-    def _update_node_inputs(self, node: tf.NodeDef, node_mapping: Dict[str, str]):
-        """
-        Update node's inputs based on node_mapping (old_name -> new_name).
-        Preserves port numbers and control dependency markers.
-        """
-        updated_inputs = []
-        for input_name in node.input:
-            # Parse input: ^control or name:port or name
-            is_control = input_name.startswith("^")
-            base_name = self._extract_base_name(input_name)
-            
-            # Extract port if present
-            port = ""
-            if not is_control and ":" in input_name:
-                port = ":" + input_name.split(":", 1)[1]
-            
-            # Remap if in mapping
-            if base_name in node_mapping:
-                new_base = node_mapping[base_name]
-                if is_control:
-                    updated_inputs.append(f"^{new_base}")
-                else:
-                    updated_inputs.append(f"{new_base}{port}")
-            else:
-                updated_inputs.append(input_name)
-        
-        # Update in place
-        del node.input[:]
-        node.input.extend(updated_inputs)
-
-    @log_optimization
-    def optimize(
-        self,
-        pass_name=None,
-        max_iterations=100,
-        auto_cleanup=True,
-        protected_nodes=None,
-    ):
-        protected_nodes = set(protected_nodes or [])
-        modified = True
-        iteration = 0
-        current_graph_def = self.graph_def
-
-        while modified:
-            if iteration >= max_iterations:
-                logging.warning(
-                    f"Optimization pass '{pass_name}' reached max iterations ({max_iterations}). Stopping."
-                )
-                break
-            iteration += 1
-            modified = False
-            new_nodes = []
-            replaced_node_names = set()
-            global_node_mapping = {}  # Collect all node mappings in this iteration
-
-            # Rebuild state and compute reference counts before optimization
-            self.nodes = {node.name: node for node in current_graph_def.node}
-            self._rebuild_consumer_index()
-            refs_before = self._compute_reference_counts(current_graph_def)
-
-            for node in current_graph_def.node:
-                if node.name in replaced_node_names:
-                    continue
-
-                match = None
-
-                # Check patterns relevant to this op_type + wildcard patterns
-                candidates = (
-                    self.pattern_index.get(node.op, []) + self.wildcard_patterns
-                )
-
-                found_match = False
-                for pattern, rewriter in candidates:
-                    match = pattern.match(node, self)
-                    if match:
-                        rewriter_output = rewriter(match, self)
-                        if rewriter_output is not None:
-                            result = RewriteResult.from_nodes(rewriter_output)
-                            
-                            # Preserve external control dependencies
-                            internal_names = match.all_matched_nodes
-                            relevant_controls = [
-                                ci
-                                for ci in match.control_inputs
-                                if ci.lstrip("^") not in internal_names
-                            ]
-
-                            if relevant_controls and result.new_nodes:
-                                target_node = None
-                                for new_node in result.new_nodes:
-                                    if new_node.name == node.name:
-                                        target_node = new_node
-                                        break
-                                if target_node is None:
-                                    target_node = result.new_nodes[0]
-
-                                if target_node:
-                                    existing = set(target_node.input)
-                                    for ci in relevant_controls:
-                                        if ci not in existing:
-                                            target_node.input.append(ci)
-                                            existing.add(ci)
-
-                            new_nodes.extend(result.new_nodes)
-                            # DEBUG: 记录每个新增的节点
-                            for new_node in result.new_nodes:
-                                logging.debug(f"Added node: {new_node.name} (op: {new_node.op})")
-                            replaced_node_names.add(node.name)
-                            
-                            # Collect node mappings from this rewrite
-                            if result.node_mapping:
-                                global_node_mapping.update(result.node_mapping)
-                            
-                            # Mark additional nodes as replaced if specified
-                            if result.replaced_nodes:
-                                # Safety check: verify no external consumers
-                                all_replaced = {node.name} | set(result.replaced_nodes)
-                                nodes_with_ext_consumers = self._check_external_consumers(
-                                    result.replaced_nodes, all_replaced, internal_names
-                                )
-                                
-                                if nodes_with_ext_consumers:
-                                    self._log_external_consumer_warning(nodes_with_ext_consumers)
-                                    safe_to_replace = [
-                                        name for name in result.replaced_nodes
-                                        if name not in [n for n, _ in nodes_with_ext_consumers]
-                                    ]
-                                    replaced_node_names.update(safe_to_replace)
-                                    logging.debug(
-                                        f"Marked {len(safe_to_replace)}/{len(result.replaced_nodes)} nodes as replaced "
-                                        f"(skipped {len(nodes_with_ext_consumers)} with external consumers)"
-                                    )
-                                else:
-                                    replaced_node_names.update(result.replaced_nodes)
-
-                            found_match = True
-                            modified = True
-                            break
-
-                if not found_match:
-                    new_nodes.append(node)
-
-            if modified:
-                nodes_before_iteration = len(current_graph_def.node)
-                
-                # Apply node mappings to update all consumer references
-                if global_node_mapping:
-                    logging.debug(f"Applying node mapping: {len(global_node_mapping)} remappings")
-                    for node in new_nodes:
-                        self._update_node_inputs(node, global_node_mapping)
-                
-                next_graph_def = tf.GraphDef()
-                next_graph_def.node.extend(new_nodes)
-                if auto_cleanup:
-                    current_graph_def = self._prune_dead_nodes(
-                        next_graph_def, pass_name, refs_before, protected_nodes
-                    )
-                else:
-                    current_graph_def = next_graph_def
-                
-                # INFO: 每次迭代的节点数变化
-                nodes_after_iteration = len(current_graph_def.node)
-                node_diff = nodes_before_iteration - nodes_after_iteration
-                prefix = f"[{pass_name}] " if pass_name else ""
-                logging.info(
-                    f"{prefix}Iteration {iteration}: {nodes_before_iteration} -> {nodes_after_iteration} nodes "
-                    f"(-{node_diff})"
-                )
-
-        # Final cleanup
-        if auto_cleanup:
-            nodes_before_final = len(current_graph_def.node)
-            current_graph_def = self._final_prune(
-                current_graph_def, pass_name, protected_nodes
-            )
-            nodes_after_final = len(current_graph_def.node)
-            if nodes_before_final != nodes_after_final:
-                prefix = f"[{pass_name}] " if pass_name else ""
-                logging.info(
-                    f"{prefix}Final cleanup: {nodes_before_final} -> {nodes_after_final} nodes "
-                    f"(-{nodes_before_final - nodes_after_final})"
-                )
-
-        return current_graph_def
-
-    def _compute_reference_counts(self, graph_def: tf.GraphDef) -> Dict[str, int]:
-        """Compute reference count for each node."""
-        reference_counts: Dict[str, int] = collections.defaultdict(int)
-        for node in graph_def.node:
-            for input_name in node.input:
-                reference_counts[self._extract_base_name(input_name)] += 1
-        return reference_counts
-    
-    def _check_external_consumers(self, replaced_nodes, all_replaced, internal_names):
-        """Check if replaced nodes have external consumers (not in replaced set)."""
-        nodes_with_ext_consumers = []
-        for replaced_name in replaced_nodes:
-            consumers = self.consumers.get(replaced_name, [])
-            external_consumers = [
-                c for c in consumers 
-                if c not in all_replaced and c not in internal_names
-            ]
-            if external_consumers:
-                nodes_with_ext_consumers.append((replaced_name, external_consumers))
-        return nodes_with_ext_consumers
-    
-    def _log_external_consumer_warning(self, nodes_with_ext_consumers):
-        """Log warning about nodes with external consumers."""
-        logging.warning("Nodes marked as replaced still have external consumers:")
-        for replaced_name, ext_consumers in nodes_with_ext_consumers[:3]:
-            consumer_list = ', '.join(ext_consumers[:5])
-            if len(ext_consumers) > 5:
-                consumer_list += f" and {len(ext_consumers) - 5} more..."
-            logging.warning(f"  - {replaced_name}: consumed by {consumer_list}")
-        if len(nodes_with_ext_consumers) > 3:
-            logging.warning(f"  ... and {len(nodes_with_ext_consumers) - 3} more nodes")
-
-    def _final_prune(self, graph_def, pass_name=None, protected_nodes=None):
-        """
-        Final cleanup pass to remove all remaining dead nodes.
-        Iteratively removes nodes with zero references until no more dead nodes exist.
-        """
-        protected_nodes = protected_nodes or set()
-        iteration = 0
-        max_iterations = 100
-        
-        while iteration < max_iterations:
-            refs = self._compute_reference_counts(graph_def)
-            
-            dead_nodes = {
-                node.name for node in graph_def.node
-                if node.op != "Placeholder" 
-                and node.name not in protected_nodes
-                and refs[node.name] == 0
-            }
-            
-            if not dead_nodes:
-                # No more dead nodes to remove
-                break
-            
-            logging.debug(
-                f"[{pass_name or 'optimize'}] Final pruning iteration {iteration + 1}: "
-                f"removing {len(dead_nodes)} dead nodes"
-            )
-            
-            graph_def = self._remove_nodes(graph_def, dead_nodes, pass_name, "dead node, ref_count=0")
-            iteration += 1
-        
-        if iteration >= max_iterations:
-            logging.warning(
-                f"[{pass_name or 'optimize'}] Final pruning reached max iterations ({max_iterations})"
-            )
-        elif iteration > 0:
-            logging.debug(
-                f"[{pass_name or 'optimize'}] Final pruning completed in {iteration} iteration(s)"
-            )
-        
-        return graph_def
-
-    def _prune_dead_nodes(self, graph_def, pass_name=None, refs_before=None, protected_nodes=None):
-        """Remove nodes that became dead after optimization."""
-        refs_after = self._compute_reference_counts(graph_def)
-        protected_nodes = protected_nodes or set()
-
-        dead_nodes = set()
-        for node in graph_def.node:
-            if node.op == "Placeholder" or node.name in protected_nodes:
-                continue
-
-            # Always prune unreferenced Const nodes
-            if node.op == "Const" and refs_after[node.name] == 0:
-                dead_nodes.add(node.name)
-                continue
-
-            # Prune nodes that became dead (had refs before, now don't)
-            if refs_before and node.name in refs_before:
-                if refs_before[node.name] > 0 and refs_after[node.name] == 0:
-                    dead_nodes.add(node.name)
-
-        if dead_nodes:
-            logging.debug(
-                f"[{pass_name or 'optimize'}] Pruning {len(dead_nodes)} dead nodes"
-            )
-            return self._remove_nodes(graph_def, dead_nodes, pass_name, "dead node, ref_count=0")
-        
-        return graph_def
-    
-    def _remove_nodes(self, graph_def, nodes_to_remove, pass_name=None, reason=None):
-        """Create new GraphDef without specified nodes."""
-        pruned_graph_def = tf.GraphDef()
-        for node in graph_def.node:
-            if node.name not in nodes_to_remove:
-                pruned_graph_def.node.add().CopyFrom(node)
-        # DEBUG: 记录每个被删除的节点
-        prefix = f"[{pass_name}] " if pass_name else ""
-        reason_str = f" ({reason})" if reason else ""
-        for node_name in nodes_to_remove:
-            logging.debug(f"{prefix}Removed node: {node_name}{reason_str}")
-        return pruned_graph_def
-
-    def canonicalize_axis(self, axis, rank):
-        """Standardizes negative axes for easier comparison."""
-        if axis is None:
-            return None
-        if axis >= 0:
-            return axis
-        if rank is None:
-            return None  # Cannot canonicalize negative axis without rank
-        return axis + rank
-
     def get_node_attr(self, node_or_name, attr_name, default=None):
         """Returns the unwrapped attribute value of a node."""
         node = (
@@ -420,44 +294,359 @@ class GraphOptimizer:
             if isinstance(node_or_name, str)
             else node_or_name
         )
-        if not node or attr_name not in node.attr:
+        if node is None or attr_name not in node.attr:
             return default
         return get_attr_value(node.attr[attr_name])
 
     def get_node_shape(self, node_or_name):
-        """Returns the output shape of a node as a list of ints."""
+        """Returns the output shape of a node, if available."""
         node = (
             self.nodes.get(node_or_name)
             if isinstance(node_or_name, str)
             else node_or_name
         )
-        if not node:
+        if node is None:
             return None
 
-        # Try 'shape' attribute
+        if "_output_shapes" in node.attr:
+            shapes = node.attr["_output_shapes"].list.shape
+            if shapes:
+                return [dim.size for dim in shapes[0].dim]
+
         if "shape" in node.attr:
             return [dim.size for dim in node.attr["shape"].shape.dim]
 
-        # Try '_output_shapes' attribute
-        if "_output_shapes" in node.attr:
-            try:
-                shape_list = node.attr["_output_shapes"].list.shape
-                if shape_list:
-                    return [dim.size for dim in shape_list[0].dim]
-            except Exception:
-                pass
         return None
 
     def get_node_rank(self, node_or_name):
-        """Returns the rank of a node's output tensor."""
+        """Returns the rank (number of dimensions) of a node's output."""
         shape = self.get_node_shape(node_or_name)
         return len(shape) if shape is not None else None
+    
+    def canonicalize_axis(self, axis, rank):
+        """Standardizes negative axes for easier comparison."""
+        return canonicalize_axis(axis, rank)
 
+    # =========================================================================
+    # Graph Modification / Pruning (delegates to utils)
+    # =========================================================================
+    
+    def compute_reference_counts(self, graph_def: tf.GraphDef = None) -> Dict[str, int]:
+        """Compute reference count for each node."""
+        return compute_reference_counts(graph_def or self.graph_def)
+    
+    # Alias for backward compatibility
+    _compute_reference_counts = compute_reference_counts
+    
+    def remove_nodes(self, graph_def, nodes_to_remove, pass_name=None, reason=None):
+        """Create new GraphDef without specified nodes."""
+        return remove_nodes(graph_def, nodes_to_remove, pass_name, reason, logging)
+    
+    # Alias for backward compatibility
+    _remove_nodes = remove_nodes
+    
+    def prune_dead_nodes(self, graph_def, pass_name=None, refs_before=None, protected_nodes=None):
+        """Remove nodes that became dead after optimization."""
+        return prune_dead_nodes(graph_def, pass_name, refs_before, protected_nodes, logging)
+    
+    # Alias for backward compatibility
+    _prune_dead_nodes = prune_dead_nodes
+    
+    def final_prune(self, graph_def, pass_name=None, protected_nodes=None):
+        """Final cleanup pass to remove all remaining dead nodes."""
+        return final_prune(graph_def, pass_name, protected_nodes, logger=logging)
+    
+    # Alias for backward compatibility
+    _final_prune = final_prune
+    
     def prune(self, output_names):
-        """Removes nodes not needed for the given outputs."""
+        """Prune the graph to only include nodes required to compute output_names."""
         from tensorflow.python.framework import graph_util
+        self.graph_def = graph_util.extract_sub_graph(self.graph_def, output_names)
+        self.load_state(self.graph_def)
+        return self.graph_def
+    
+    # =========================================================================
+    # Node Input Update (delegates to utils)
+    # =========================================================================
+    
+    @staticmethod
+    def _extract_base_name(input_name: str) -> str:
+        """Extract base node name from input (strip port and control marker)."""
+        return extract_base_name(input_name)
+    
+    def update_node_inputs(self, node: tf.NodeDef, node_mapping: Dict[str, str]):
+        """Update node's inputs based on node_mapping."""
+        update_node_inputs(node, node_mapping)
+    
+    # Alias for backward compatibility
+    _update_node_inputs = update_node_inputs
+    
+    # =========================================================================
+    # External Consumer Check (delegates to utils)
+    # =========================================================================
+    
+    def check_external_consumers(self, replaced_nodes, all_replaced, internal_names):
+        """Check if replaced nodes have external consumers."""
+        return check_external_consumers(self.consumers, replaced_nodes, all_replaced, internal_names)
+    
+    # Alias for backward compatibility
+    _check_external_consumers = check_external_consumers
+    
+    @staticmethod
+    def log_external_consumer_warning(nodes_with_ext_consumers):
+        """Log warning about nodes with external consumers."""
+        log_external_consumer_warning(nodes_with_ext_consumers, logging)
+    
+    # Alias for backward compatibility
+    _log_external_consumer_warning = log_external_consumer_warning
 
-        return graph_util.extract_sub_graph(self.graph_def, output_names)
+    # =========================================================================
+    # Pattern Matching (delegates to PatternMatcher)
+    # =========================================================================
+    
+    def add_transformation(self, pattern, rewriter):
+        """Adds a transformation rule (pattern -> rewriter)."""
+        logging.info(f"Adding transformation: rule={rewriter.__name__} pattern={pattern}")
+        self._matcher.register(pattern, rewriter)
+    
+    def clear_transformations(self):
+        """Clear all registered transformations."""
+        self._matcher.clear()
+    
+    @property
+    def pattern_index(self):
+        """Access pattern index (for backward compatibility)."""
+        return self._matcher.pattern_index
+    
+    @property
+    def wildcard_patterns(self):
+        """Access wildcard patterns (for backward compatibility)."""
+        return self._matcher.wildcard_patterns
+    
+    @log_optimization
+    def optimize(
+        self, 
+        pass_name=None, 
+        max_iterations=100, 
+        auto_cleanup=True, 
+        protected_nodes=None,
+        context: OptimizationContext = None
+    ):
+        """
+        Run pattern-based optimization until convergence.
+        
+        Args:
+            pass_name: Pass name for logging
+            max_iterations: Maximum iterations (can be overridden by context)
+            auto_cleanup: Whether to prune dead nodes (can be overridden by context)
+            protected_nodes: Protected node names (can be overridden by context)
+            context: Optional OptimizationContext for unified management
+        """
+        # Use context if provided, otherwise create from parameters
+        if context:
+            protected_set = context.protected_nodes
+            auto_cleanup = context.auto_cleanup
+            max_iterations = context.max_iterations
+        else:
+            protected_set = set(protected_nodes or [])
+        
+        current_graph_def = self.graph_def
+        
+        for iteration in range(max_iterations):
+            self.load_state(current_graph_def)
+            new_graph_def, changes = self._matcher.match_once(
+                self, pass_name=pass_name, auto_cleanup=auto_cleanup, protected_nodes=protected_set
+            )
+            if changes == 0:
+                break
+            current_graph_def = new_graph_def
+        
+        if auto_cleanup:
+            nodes_before = len(current_graph_def.node)
+            current_graph_def = self.final_prune(current_graph_def, pass_name, protected_set)
+            nodes_after = len(current_graph_def.node)
+            if nodes_before != nodes_after:
+                prefix = f"[{pass_name}] " if pass_name else ""
+                logging.info(f"{prefix}Final cleanup: {nodes_before} -> {nodes_after} nodes")
+        
+        return current_graph_def
+    
+    def match_patterns_once(self, pass_name=None, auto_cleanup=True, protected_nodes=None, context=None):
+        """Run a single iteration of pattern-based matching."""
+        if context:
+            protected_nodes = context.protected_nodes
+            auto_cleanup = context.auto_cleanup
+        return self._matcher.match_once(self, pass_name, auto_cleanup, protected_nodes)
+
+
+class PatternMatcher:
+    """
+    Pattern matching engine for graph optimization.
+    
+    Responsibilities:
+    - Register patterns and rewriters
+    - Execute single-pass pattern matching on a graph
+    - Handle control dependency preservation
+    - Handle node replacement and mapping
+    
+    Does NOT handle:
+    - Iteration/convergence (handled by BasePass.transform)
+    - Graph state management (handled by GraphOptimizer)
+    """
+    
+    def __init__(self):
+        self.pattern_index: Dict[str, List[Tuple["Pattern", AnyType]]] = collections.defaultdict(list)
+        self.wildcard_patterns: List[Tuple["Pattern", AnyType]] = []
+    
+    def register(self, pattern, rewriter):
+        """Register a pattern-rewriter pair."""
+        op_type = pattern.get_indexed_op_type()
+        if op_type is None:
+            self.wildcard_patterns.append((pattern, rewriter))
+        else:
+            self.pattern_index[op_type].append((pattern, rewriter))
+    
+    def clear(self):
+        """Clear all registered patterns."""
+        self.pattern_index = collections.defaultdict(list)
+        self.wildcard_patterns = []
+    
+    def match_once(
+        self,
+        optimizer: GraphOptimizer,
+        pass_name: str = None,
+        auto_cleanup: bool = True,
+        protected_nodes: set = None,
+    ):
+        """
+        Run a single iteration of pattern matching.
+        
+        Args:
+            optimizer: GraphOptimizer with current graph state
+            pass_name: Pass name for logging
+            auto_cleanup: If True, prune dead nodes after matching
+            protected_nodes: Nodes that should not be pruned
+        
+        Returns:
+            tuple: (new_graph_def, changes_count)
+        """
+        protected_nodes = set(protected_nodes or [])
+        optimizer.protected_nodes = protected_nodes
+        optimizer.current_pass_name = pass_name  # Set for logging in Pattern.match
+        
+        refs_before = optimizer.compute_reference_counts()
+        nodes_before = len(optimizer.graph_def.node)
+        prefix = f"[{pass_name}] " if pass_name else ""
+        
+        new_nodes = []
+        replaced_node_names = set()
+        added_node_names = []  # Track newly added nodes for logging
+        global_node_mapping = {}
+        modified = False
+
+        for node in optimizer.graph_def.node:
+            if node.name in replaced_node_names:
+                continue
+
+            candidates = self.pattern_index.get(node.op, []) + self.wildcard_patterns
+
+            found_match = False
+            for pattern, rewriter in candidates:
+                match = pattern.match(node, optimizer)
+                if match:
+                    rewriter_output = rewriter(match, optimizer)
+                    if rewriter_output is not None:
+                        result = RewriteResult.from_nodes(rewriter_output)
+                        
+                        # Preserve external control dependencies
+                        internal_names = match.all_matched_nodes
+                        relevant_controls = [
+                            ci for ci in match.control_inputs
+                            if ci.lstrip("^") not in internal_names
+                        ]
+
+                        if relevant_controls and result.new_nodes:
+                            target_node = result.new_nodes[0]
+                            for new_node in result.new_nodes:
+                                if new_node.name == node.name:
+                                    target_node = new_node
+                                    break
+                            if target_node:
+                                existing = set(target_node.input)
+                                for ci in relevant_controls:
+                                    if ci not in existing:
+                                        target_node.input.append(ci)
+                                        existing.add(ci)
+
+                        # Log replaced root node
+                        logging.info(f"{prefix}Replaced: {node.name} (op: {node.op})")
+                        replaced_node_names.add(node.name)
+                        
+                        # Track and log new nodes
+                        for new_node in result.new_nodes:
+                            new_nodes.append(new_node)
+                            # Only log truly new nodes (not same name as replaced)
+                            if new_node.name != node.name:
+                                added_node_names.append((new_node.name, new_node.op))
+                        
+                        if result.node_mapping:
+                            global_node_mapping.update(result.node_mapping)
+                        
+                        if result.replaced_nodes:
+                            all_replaced = {node.name} | set(result.replaced_nodes)
+                            nodes_with_ext_consumers = optimizer.check_external_consumers(
+                                result.replaced_nodes, all_replaced, internal_names
+                            )
+                            
+                            if nodes_with_ext_consumers:
+                                optimizer.log_external_consumer_warning(nodes_with_ext_consumers)
+                                safe_to_replace = [
+                                    name for name in result.replaced_nodes
+                                    if name not in [n for n, _ in nodes_with_ext_consumers]
+                                ]
+                                replaced_node_names.update(safe_to_replace)
+                            else:
+                                replaced_node_names.update(result.replaced_nodes)
+
+                        found_match = True
+                        modified = True
+                        break
+
+            if not found_match:
+                new_nodes.append(node)
+
+        if not modified:
+            return optimizer.graph_def, 0
+
+        # Log newly added nodes
+        for node_name, node_op in added_node_names:
+            logging.info(f"{prefix}Added: {node_name} (op: {node_op})")
+
+        # Apply node mappings
+        if global_node_mapping:
+            logging.debug(f"Applying node mapping: {len(global_node_mapping)} remappings")
+            for node in new_nodes:
+                optimizer.update_node_inputs(node, global_node_mapping)
+        
+        # Build new graph
+        new_graph_def = tf.GraphDef()
+        new_graph_def.node.extend(new_nodes)
+        
+        if auto_cleanup:
+            new_graph_def = optimizer.prune_dead_nodes(
+                new_graph_def, pass_name, refs_before, protected_nodes
+            )
+        
+        # Log iteration summary
+        nodes_after = len(new_graph_def.node)
+        node_diff = nodes_before - nodes_after
+        logging.info(
+            f"{prefix}Summary: {nodes_before} -> {nodes_after} nodes "
+            f"(replaced: {len(replaced_node_names)}, added: {len(added_node_names)}, diff: -{node_diff})"
+        )
+        
+        return new_graph_def, len(replaced_node_names)
 
 
 class MatchContext:
@@ -470,6 +659,7 @@ class MatchContext:
 class Pattern:
     def __init__(self, alias=None):
         self.alias = alias
+        self.consumer_count = None  # Expected number of consumers (None = any)
 
     @log_match
     def match(
@@ -865,7 +1055,7 @@ def ConstValue(value, alias=None):
 class BasePass:
     """Base class for all graph optimization passes."""
 
-    def __init__(self, name=None, optimizer_alias=None):
+    def __init__(self, name=None, optimizer_alias=None, iterative=False, max_iterations=100):
         """
         Initialize a pass.
         
@@ -873,9 +1063,13 @@ class BasePass:
             name: Human-readable pass name (defaults to class name)
             optimizer_alias: Short alias for node naming (e.g., 'pack_hoist', 'concat_fuse')
                            If not provided, defaults to a simplified version of name
+            iterative: If True, run transform_once() repeatedly until convergence (no changes)
+            max_iterations: Maximum iterations for iterative mode (safety limit)
         """
         self.name = name or self.__class__.__name__
         self.optimizer_alias = optimizer_alias or self._generate_default_alias()
+        self.iterative = iterative
+        self.max_iterations = max_iterations
         self._node_counters = {}  # Per-operation-type counters for unique node naming
         self._node_cache = {}  # Node signature -> node name cache for deduplication
     
@@ -998,144 +1192,42 @@ class BasePass:
         """
         Extract base node name from input (strip port and control marker).
         
-        This is an alias for _extract_base_name for compatibility with subclasses.
-        
-        Args:
-            input_name: Input name (may contain :port or ^ prefix)
-            
-        Returns:
-            str: Cleaned base node name
-            
-        Examples:
-            'node:0' -> 'node'
-            '^control_dep' -> 'control_dep'
-            'node:1' -> 'node'
-            'node' -> 'node'
+        This is an alias for extract_base_name for compatibility with subclasses.
         """
-        return input_name.split(':')[0].lstrip('^')
-    
-    @staticmethod
-    def extract_key_attrs(attrs, op_type=None):
-        """
-        提取关键属性用于节点签名（排除形状等运行时属性）。
-        
-        跳过的属性：_output_shapes, _class
-        对于大多数节点，T 和 dtype 通常是推断出来的，不影响语义等价性。
-        但对于 Const 节点，dtype 是关键属性，必须包含在签名中。
-        
-        Args:
-            attrs: 属性字典（AttrValue对象）
-            op_type: 节点操作类型（用于特殊处理某些操作）
-            
-        Returns:
-            tuple: 属性签名元组 (attr_name, type, value)
-            
-        Examples:
-            {'axis': AttrValue(i=0), 'T': AttrValue(type=DT_FLOAT)}
-            -> (('axis', 'i', 0),)
-            
-            Const 节点会包含 dtype:
-            {'value': tensor, 'dtype': DT_INT32}
-            -> (('dtype', 'type', DT_INT32), ('value', 'tensor', <bytes>))
-        """
-        key_attrs = []
-        # 基础跳过属性
-        skip_attrs = {'_output_shapes', '_class'}
-        
-        # 对于非 Const 节点，额外跳过 T 和 dtype
-        if op_type != 'Const':
-            skip_attrs.update({'T', 'dtype'})
-        
-        for attr_name in sorted(attrs.keys()):
-            if attr_name in skip_attrs:
-                continue
-            
-            attr_value = attrs[attr_name]
-            # 简化属性值表示
-            if attr_value.HasField('i'):
-                key_attrs.append((attr_name, 'i', attr_value.i))
-            elif attr_value.HasField('f'):
-                key_attrs.append((attr_name, 'f', attr_value.f))
-            elif attr_value.HasField('b'):
-                key_attrs.append((attr_name, 'b', attr_value.b))
-            elif attr_value.HasField('s'):
-                key_attrs.append((attr_name, 's', attr_value.s))
-            elif attr_value.HasField('type'):
-                # 数据类型（对 Const 节点很重要）
-                key_attrs.append((attr_name, 'type', attr_value.type))
-            elif attr_value.HasField('tensor'):
-                # 对于 tensor 类型（Const 节点的 value 属性）
-                # 将 tensor 序列化为字节串作为签名，确保相同值的常量有相同签名
-                tensor = attr_value.tensor
-                tensor_bytes = tensor.SerializeToString()
-                key_attrs.append((attr_name, 'tensor', tensor_bytes))
-        
-        return tuple(key_attrs)
-    
-    def create_node_signature(self, node, sort_inputs=True):
-        """
-        创建节点签名用于识别语义相同的节点。
-        
-        签名包括：操作类型、输入列表、关键属性
-        
-        对于 Const 节点，会包含 dtype 和 value 进行比较。
-        
-        Args:
-            node: tf.NodeDef 节点
-            sort_inputs: 是否排序输入（对于可交换操作可以设为True）
-            
-        Returns:
-            tuple: (op_type, inputs_tuple, key_attrs)
-            
-        Examples:
-            Pack([a, b, c], axis=0) -> ('Pack', ('a', 'b', 'c'), (('axis', 'i', 0),))
-            Const(value=16, dtype=int32) -> ('Const', (), (('dtype', 'type', DT_INT32), ('value', 'tensor', <bytes>)))
-        """
-        # 清理输入名称
-        cleaned_inputs = [self.clean_input_name(inp) for inp in node.input]
-        
-        # 根据需要排序输入
-        if sort_inputs:
-            inputs_tuple = tuple(sorted(cleaned_inputs))
-        else:
-            inputs_tuple = tuple(cleaned_inputs)
-        
-        # 提取关键属性（传入 op_type 以便特殊处理）
-        key_attrs = self.extract_key_attrs(node.attr, op_type=node.op)
-        
-        return (node.op, inputs_tuple, key_attrs)
+        return extract_base_name(input_name)
     
     def get_or_create_cached_node(self, op_type, inputs, attrs, root_node_name, 
                                    context_desc="", create_func=None):
         """
-        获取或创建缓存节点的统一接口（用于节点去重）。
+        获取或创建缓存节点（用于 pass 内部避免重复创建相同节点）。
         
-        工作原理：
-        1. 根据 (op_type, inputs, attrs) 创建签名
-        2. 如果签名已存在于缓存，返回缓存的节点名
-        3. 否则创建新节点，加入缓存，返回新节点
+        缓存策略：基于 (op_type, inputs, attrs_serialized) 签名
+        - 如果签名相同，返回已缓存的节点名
+        - 如果签名不同，创建新节点并缓存
         
         Args:
             op_type: 操作类型
-            inputs: 输入列表（节点名称列表）
-            attrs: 属性字典（AttrValue对象）
+            inputs: 输入列表（节点名称列表，保留端口号）
+            attrs: 属性字典（AttrValue 对象）
             root_node_name: 根节点名称（用于生成唯一名称）
             context_desc: 上下文描述（用于日志）
             create_func: 可选的节点创建函数 func(name, inputs, attrs) -> NodeDef
-                        如果为None，则返回None作为new_node
             
         Returns:
             tuple: (node_name, is_new_node, node_def_or_none)
-                - node_name: 节点名称（缓存命中时是已存在的名称）
-                - is_new_node: 是否是新创建的节点
-                - node_def_or_none: 如果是新节点返回NodeDef，否则返回None
         """
         from .utils import create_node
         
-        # 创建节点签名（输入保持顺序）
+        # 创建签名：(op_type, inputs_tuple, attrs_serialized)
+        # inputs 保持原样（包含端口号）
         inputs_tuple = tuple(inputs)
-        key_attrs = self.extract_key_attrs(attrs, op_type=op_type)
-        node_signature = (op_type, inputs_tuple, key_attrs)
+        # attrs 序列化为 bytes 确保可哈希
+        attrs_tuple = tuple(
+            (k, attrs[k].SerializeToString()) 
+            for k in sorted(attrs.keys()) 
+            if not k.startswith('_')  # 跳过内部属性
+        )
+        node_signature = (op_type, inputs_tuple, attrs_tuple)
         
         # Check cache
         if node_signature in self._node_cache:
@@ -1156,173 +1248,6 @@ class BasePass:
         logging.debug(f"[{self.name}] Created new {op_type} node: {new_name}")
         
         return new_name, True, new_node
-    
-    def build_deduplication_map(self, optimizer, skip_ops=None, protected_nodes=None):
-        """
-        构建全局去重映射，识别图中语义相同的重复节点。
-        
-        Args:
-            optimizer: GraphOptimizer 实例
-            skip_ops: 要跳过的操作类型集合（这些节点不应去重）
-                     默认跳过：Placeholder, Variable, VariableV2, Identity
-                     注意：Const 节点默认不跳过，可以根据 value 和 dtype 去重
-            protected_nodes: 受保护的节点集合（这些节点不会被删除，但可以作为规范节点）
-            
-        Returns:
-            dict: {duplicate_node_name -> canonical_node_name}
-            
-        Examples:
-            如果图中有两个完全相同的 MatMul 节点：
-            - MatMul_1(a, b) 
-            - MatMul_2(a, b)  # 重复
-            返回: {'MatMul_2': 'MatMul_1'}
-        """
-        from collections import defaultdict
-        
-        if skip_ops is None:
-            skip_ops = {'Placeholder', 'Variable', 'VariableV2', 'Identity'}
-        
-        protected_set = set(protected_nodes or [])
-        
-        # 按节点签名分组
-        nodes_by_signature = defaultdict(list)
-        
-        for node in optimizer.graph_def.node:
-            # 跳过某些不应该去重的节点类型
-            if node.op in skip_ops:
-                continue
-            
-            # 创建签名时保留控制依赖标记（对于CSE很重要）
-            signature = self._create_cse_signature(node)
-            nodes_by_signature[signature].append(node.name)
-        
-        # 构建去重映射
-        dedup_map = {}
-        
-        for signature, node_names in nodes_by_signature.items():
-            if len(node_names) <= 1:
-                continue
-            
-            # 选择规范节点：优先选择受保护的节点，然后是名字最短的
-            protected_candidates = [n for n in node_names if n in protected_set]
-            
-            if protected_candidates:
-                # 如果有受保护的节点，从中选择名字最短的作为规范节点
-                canonical = min(protected_candidates, key=lambda n: (len(n), n))
-            else:
-                # 否则选择名字最短的作为规范节点
-                canonical = min(node_names, key=lambda n: (len(n), n))
-            
-            # 将所有非规范节点（且非受保护节点）映射到规范节点
-            for node_name in node_names:
-                if node_name != canonical and node_name not in protected_set:
-                    dedup_map[node_name] = canonical
-        
-        return dedup_map
-    
-    def _create_cse_signature(self, node):
-        """
-        为 CSE 创建节点签名，保留控制依赖标记和端口号。
-        
-        与 create_node_signature 的区别：
-        - create_node_signature: 去除端口和控制依赖标记，用于一般模式匹配
-        - _create_cse_signature: 保留控制依赖标记和端口号，用于 CSE 精确去重
-        
-        这样可以区分：
-        - Add(a, b) 和 Add(a, b, ^ctrl) 是不同的节点
-        - Add(a, b, ^ctrl1) 和 Add(a, b, ^ctrl2) 是不同的节点
-        - Add(split:0, split:0) 和 Add(split:0, split:1) 是不同的节点
-        
-        Args:
-            node: tf.NodeDef 节点
-            
-        Returns:
-            tuple: (op_type, inputs_tuple_with_ctrl_deps_and_ports, key_attrs)
-        """
-        # 对于每个输入，保留控制依赖前缀和端口后缀
-        # 只有对于没有端口的普通输入，默认为 :0
-        cleaned_inputs = []
-        for inp in node.input:
-            cleaned_inputs.append(inp)
-            # # 保留控制依赖前缀 ^ （完整保留，包括端口如 ^node:0）
-            # if inp.startswith('^'):
-            #     cleaned_inputs.append(inp)
-            # else:
-            #     # 对于数据输入，保留完整的 node:port 格式
-            #     # 如果没有端口号，TensorFlow 默认是 :0，但为了签名一致性，保持原样
-            #     cleaned_inputs.append(inp)
-        
-        # 输入保持原始顺序（不排序）
-        inputs_tuple = tuple(cleaned_inputs)
-        
-        # 提取关键属性
-        key_attrs = self.extract_key_attrs(node.attr, op_type=node.op)
-        
-        return (node.op, inputs_tuple, key_attrs)
-    
-    def apply_deduplication_map(self, optimizer, dedup_map):
-        """
-        应用去重映射：更新所有节点的输入引用，删除重复节点。
-        
-        工作流程：
-        1. 遍历所有节点，更新输入引用（将重复节点替换为规范节点）
-        2. 删除映射中的重复节点
-        3. 重建优化器的内部索引
-        
-        Args:
-            optimizer: GraphOptimizer 实例
-            dedup_map: 去重映射 {duplicate_node_name -> canonical_node_name}
-        """
-        removed_nodes = set(dedup_map.keys())
-        
-        # 更新所有节点的输入引用
-        for node in optimizer.graph_def.node:
-            if node.name in removed_nodes:
-                continue
-            
-            new_inputs = []
-            for inp in node.input:
-                # 提取基础名称（去除端口和控制依赖标记）
-                port_suffix = ''
-                control_prefix = ''
-                
-                if inp.startswith('^'):
-                    control_prefix = '^'
-                    inp = inp[1:]
-                
-                if ':' in inp:
-                    base_name, port = inp.split(':', 1)
-                    port_suffix = ':' + port
-                else:
-                    base_name = inp
-                
-                # 应用映射
-                if base_name in dedup_map:
-                    new_base = dedup_map[base_name]
-                    new_inp = control_prefix + new_base + port_suffix
-                    new_inputs.append(new_inp)
-                else:
-                    new_inputs.append(control_prefix + base_name + port_suffix)
-            
-            # 更新节点的输入列表
-            del node.input[:]
-            node.input.extend(new_inputs)
-        
-        # Delete duplicate nodes
-        new_nodes = [n for n in optimizer.graph_def.node if n.name not in removed_nodes]
-        
-        if removed_nodes:
-            logging.debug(f"[{self.name}] Removed {len(removed_nodes)} duplicate nodes")
-            for node_name in removed_nodes:
-                canonical = dedup_map.get(node_name, "unknown")
-                logging.debug(f"[{self.name}] Removed node: {node_name} (duplicate of {canonical})")
-        
-        del optimizer.graph_def.node[:]
-        optimizer.graph_def.node.extend(new_nodes)
-        
-        # 重建优化器内部状态
-        optimizer.nodes = {node.name: node for node in optimizer.graph_def.node}
-        optimizer._rebuild_consumer_index()
 
     def transform(
         self,
@@ -1331,63 +1256,198 @@ class BasePass:
         debug_dir=None,
         auto_cleanup=True,
         protected_nodes=None,
+        context: OptimizationContext = None,
+        pass_name_override: str = None,
     ):
         """
-        Applies the transformation to the given graph.
-        Should return a new GraphDef.
+        Execute the optimization pass.
+        
+        If self.iterative is True, runs transform_once() repeatedly until convergence.
+        Otherwise, runs transform_once() exactly once.
+        
+        State Management:
+        - transform_once() can modify optimizer state in-place (call optimizer.refresh_state())
+        - Or return a new GraphDef (this method will call optimizer.load_state())
+        - Or return int (change count) if state was already updated in-place
 
         Args:
             optimizer: The GraphOptimizer instance
             step: Optional step number for debugging
             debug_dir: Optional directory to save debug output
-            auto_cleanup: If True, automatically prune dead nodes after optimization (default: True)
-            protected_nodes: List of node names that should not be pruned (e.g. outputs)
+            auto_cleanup: If True, automatically prune dead nodes after optimization
+            protected_nodes: List of node names that should not be pruned
+            context: Optional OptimizationContext for unified management
+            pass_name_override: Optional name override for statistics (e.g., "CSE (cleanup)")
+            
+        Returns:
+            GraphDef: The optimized graph
         """
-        raise NotImplementedError()
+        from .utils import save_graph
+        
+        self.reset_counters()
+        
+        # Use context if provided, otherwise create a temporary one
+        if context is None:
+            context = OptimizationContext(
+                protected_nodes=protected_nodes,
+                auto_cleanup=auto_cleanup,
+                max_iterations=self.max_iterations,
+                debug_dir=debug_dir,
+            )
+        
+        # Use override name for statistics if provided
+        effective_name = pass_name_override or self.name
+        
+        protected_set = context.protected_nodes
+        original_node_count = len(optimizer.nodes)
+        
+        # Always begin pass for statistics tracking
+        context.begin_pass(effective_name)
+        
+        if not self.iterative:
+            # Single execution mode - still track as 1 iteration
+            nodes_before = len(optimizer.nodes)
+            context.begin_iteration()
+            
+            result = self.transform_once(optimizer, context.auto_cleanup, protected_set)
+            changes = self._apply_transform_result(optimizer, result, nodes_before)
+            nodes_after = len(optimizer.nodes)
+            
+            context.end_iteration(changes, nodes_before, nodes_after)
+        else:
+            # Iterative mode - run until convergence
+            while context.current_iteration < context.max_iterations:
+                iteration = context.begin_iteration()
+                nodes_before = len(optimizer.nodes)
+                
+                result = self.transform_once(optimizer, context.auto_cleanup, protected_set)
+                changes = self._apply_transform_result(optimizer, result, nodes_before)
+                nodes_after = len(optimizer.nodes)
+                
+                context.end_iteration(changes, nodes_before, nodes_after)
+                
+                if changes == 0:
+                    break
+            
+            if context.current_iteration >= context.max_iterations:
+                context.warn_max_iterations()
+        
+        # End pass and record statistics
+        context.end_pass(original_node_count, len(optimizer.nodes))
+        
+        # Save debug output
+        self._save_debug_graph(optimizer.graph_def, step, context.debug_dir or debug_dir)
+        
+        return optimizer.graph_def
+    
+    def _apply_transform_result(self, optimizer, result, nodes_before=None):
+        """
+        Apply transform_once result and return change count.
+        
+        Args:
+            optimizer: GraphOptimizer instance
+            result: Return value from transform_once (int, GraphDef, or None)
+            nodes_before: Node count before transform (for computing diff)
+            
+        Returns:
+            int: Number of changes made
+        """
+        if isinstance(result, int):
+            # transform_once returned change count (state already updated in-place)
+            return result
+        elif isinstance(result, tf.GraphDef):
+            # transform_once returned new graph - load it
+            optimizer.load_state(result)
+            if nodes_before is not None:
+                return abs(nodes_before - len(optimizer.nodes))
+            return 1  # Assume at least one change if new graph returned
+        else:
+            # None or other - check node count diff
+            if nodes_before is not None:
+                return abs(nodes_before - len(optimizer.nodes))
+            return 0
+    
+    def _save_debug_graph(self, graph_def, step, debug_dir):
+        """Save debug graph if debug_dir and step are provided."""
+        if debug_dir and step is not None:
+            import os
+            from .utils import save_graph
+            # Handle both int and string step values
+            if isinstance(step, int):
+                filename = f"{step:02d}_{self.name}.pb"
+            else:
+                filename = f"{step}_{self.name}.pb"
+            file_path = os.path.join(debug_dir, filename)
+            save_graph(graph_def, file_path)
+    
+    def transform_once(
+        self,
+        optimizer: GraphOptimizer,
+        auto_cleanup: bool = True,
+        protected_nodes: set = None,
+    ):
+        """
+        Execute a single iteration of the optimization pass.
+        
+        Subclasses should override this method to implement the actual optimization logic.
+        
+        Args:
+            optimizer: The GraphOptimizer instance (already has current graph state)
+            auto_cleanup: If True, automatically prune dead nodes
+            protected_nodes: Set of node names that should not be pruned
+            
+        Returns:
+            One of:
+            - int: Number of changes made (for iterative convergence check)
+            - GraphDef: New graph definition
+            - None: No changes made
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement transform_once()"
+        )
 
 
 class PatternRewritePass(BasePass):
-    """A pass that applies a pattern-matching-based rewrite."""
+    """
+    A pass that applies a pattern-matching-based rewrite.
+    
+    Uses BasePass's iterative framework with GraphOptimizer.match_patterns_once()
+    for the actual pattern matching. Iterates until convergence (no more matches).
+    """
 
     def __init__(self, pattern, rewriter, name=None, optimizer_alias=None):
-        super().__init__(name, optimizer_alias)
+        # Use iterative mode - run until convergence
+        super().__init__(name, optimizer_alias, iterative=True, max_iterations=100)
         self.pattern = pattern
         self.rewriter = trace_transformation(rewriter)
 
-    def transform(
+    def transform_once(
         self,
         optimizer: GraphOptimizer,
-        step=None,
-        debug_dir=None,
-        auto_cleanup=True,
-        protected_nodes=None,
+        auto_cleanup: bool = True,
+        protected_nodes: set = None,
     ):
-        """Apply this pass using GraphOptimizer.optimize()."""
-        # Reset node counters at the start of each transform
-        self.reset_counters()
+        """
+        Execute a single iteration of pattern-based optimization.
         
-        # Add this transformation to the optimizer
+        Returns:
+            int: Number of changes made
+        """
+        # Register the pattern (clear first to avoid duplicates)
+        optimizer.clear_transformations()
         optimizer.add_transformation(self.pattern, self.rewriter)
-
-        # Run optimize() to apply the transformation iteratively
-        optimized_graph = optimizer.optimize(
+        
+        # Run one pattern matching iteration
+        new_graph_def, changes = optimizer.match_patterns_once(
             pass_name=self.name,
             auto_cleanup=auto_cleanup,
             protected_nodes=protected_nodes,
         )
-
-        # PERSISTENCE FIX: Update optimizer state for next pass
-        # Must call load_state() to sync graph_def, nodes, and consumers
-        optimizer.load_state(optimized_graph)
-
-        if debug_dir and step is not None:
-            import os
-
-            filename = f"{step:02d}_{self.name}.pb"
-            file_path = os.path.join(debug_dir, filename)
-            save_graph(optimized_graph, file_path)
-
-        return optimized_graph
+        
+        if changes > 0:
+            optimizer.load_state(new_graph_def)
+        
+        return changes
 
 
 class PassRegistry:

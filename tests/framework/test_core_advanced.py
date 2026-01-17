@@ -14,6 +14,12 @@ from graph_optimizer.core import (
     RewriteResult,
 )
 from graph_optimizer.utils import create_node
+from graph_optimizer.optimizers.common_subexpression_elimination import (
+    extract_key_attrs,
+    create_cse_signature,
+    build_deduplication_map,
+    apply_deduplication_map,
+)
 from tensorflow.core.framework import attr_value_pb2
 
 tf.disable_v2_behavior()
@@ -552,7 +558,7 @@ class TestBasePassHelpers(unittest.TestCase):
             ),
         })
         
-        key_attrs = BasePass.extract_key_attrs(const_node.attr, op_type="Const")
+        key_attrs = extract_key_attrs(const_node.attr, op_type="Const")
         attr_names = [attr[0] for attr in key_attrs]
         
         # Positive: Should include dtype and value
@@ -569,7 +575,7 @@ class TestBasePassHelpers(unittest.TestCase):
             ),
         })
         
-        key_attrs = BasePass.extract_key_attrs(const_node.attr, op_type="Const")
+        key_attrs = extract_key_attrs(const_node.attr, op_type="Const")
         attr_names = [attr[0] for attr in key_attrs]
         
         # Negative: Should NOT include internal attrs
@@ -1773,7 +1779,7 @@ class TestBasePassAliasGeneration(unittest.TestCase):
 
 
 class TestBasePassDeduplication(unittest.TestCase):
-    """Test BasePass deduplication methods."""
+    """Test CSE deduplication functions."""
     
     def test_build_deduplication_map_finds_duplicates(self):
         """Test that duplicate nodes are identified - positive case."""
@@ -1791,9 +1797,9 @@ class TestBasePassDeduplication(unittest.TestCase):
         graph_def.node.extend([a, b, add1, add2])
         
         optimizer = GraphOptimizer(graph_def)
-        pass_obj = BasePass(name="TestPass")
+        skip_ops = {'Placeholder', 'Variable', 'VariableV2', 'Identity'}
         
-        dedup_map = pass_obj.build_deduplication_map(optimizer)
+        dedup_map = build_deduplication_map(optimizer, skip_ops)
         
         # add2 should map to add1 (shorter name is canonical)
         self.assertIn("add2", dedup_map)
@@ -1814,9 +1820,9 @@ class TestBasePassDeduplication(unittest.TestCase):
         graph_def.node.extend([a, b, add1, add2])
         
         optimizer = GraphOptimizer(graph_def)
-        pass_obj = BasePass(name="TestPass")
+        skip_ops = {'Placeholder', 'Variable', 'VariableV2', 'Identity'}
         
-        dedup_map = pass_obj.build_deduplication_map(optimizer)
+        dedup_map = build_deduplication_map(optimizer, skip_ops)
         
         # No add duplicates (different input order), Consts have different values
         # Only add nodes should be checked, and they have different input orders
@@ -1831,9 +1837,9 @@ class TestBasePassDeduplication(unittest.TestCase):
         graph_def.node.extend([p1, p2])
         
         optimizer = GraphOptimizer(graph_def)
-        pass_obj = BasePass(name="TestPass")
+        skip_ops = {'Placeholder', 'Variable', 'VariableV2', 'Identity'}
         
-        dedup_map = pass_obj.build_deduplication_map(optimizer)
+        dedup_map = build_deduplication_map(optimizer, skip_ops)
         
         # Placeholders should NOT be deduplicated
         self.assertEqual(len(dedup_map), 0)
@@ -1853,10 +1859,10 @@ class TestBasePassDeduplication(unittest.TestCase):
         graph_def.node.extend([a, b, add1, add2])
         
         optimizer = GraphOptimizer(graph_def)
-        pass_obj = BasePass(name="TestPass")
+        skip_ops = {'Placeholder', 'Variable', 'VariableV2', 'Identity'}
         
         # Protect add2 - it should become canonical instead
-        dedup_map = pass_obj.build_deduplication_map(optimizer, protected_nodes={"add2"})
+        dedup_map = build_deduplication_map(optimizer, skip_ops, protected_nodes={"add2"})
         
         # add1 should map to add2 (add2 is protected, so becomes canonical)
         self.assertIn("add1", dedup_map)
@@ -1874,10 +1880,9 @@ class TestBasePassDeduplication(unittest.TestCase):
         graph_def.node.extend([a, b, add1, add2, consumer])
         
         optimizer = GraphOptimizer(graph_def)
-        pass_obj = BasePass(name="TestPass")
         
         dedup_map = {"add2": "add1"}
-        pass_obj.apply_deduplication_map(optimizer, dedup_map)
+        apply_deduplication_map(optimizer, dedup_map, "TestPass")
         
         # Consumer should now reference add1 instead of add2
         consumer_node = optimizer.nodes["consumer"]
@@ -1888,7 +1893,7 @@ class TestBasePassDeduplication(unittest.TestCase):
 
 
 class TestCSESignature(unittest.TestCase):
-    """Test BasePass._create_cse_signature method."""
+    """Test create_cse_signature function."""
     
     def test_cse_signature_preserves_control_deps(self):
         """Test CSE signature preserves control dependency markers - positive case."""
@@ -1896,34 +1901,29 @@ class TestCSESignature(unittest.TestCase):
         node = create_node("Add", "add", inputs=["a", "b", "^ctrl"])
         graph_def.node.append(node)
         
-        pass_obj = BasePass(name="TestPass")
-        sig = pass_obj._create_cse_signature(node)
+        sig = create_cse_signature(node)
         
         # Signature should include ^ctrl
         self.assertIn("^ctrl", sig[1])  # sig[1] is inputs tuple
     
     def test_cse_signature_different_control_deps_different_sig(self):
         """Test different control deps produce different signatures - positive case."""
-        pass_obj = BasePass(name="TestPass")
-        
         node1 = create_node("Add", "add1", inputs=["a", "b", "^ctrl1"])
         node2 = create_node("Add", "add2", inputs=["a", "b", "^ctrl2"])
         
-        sig1 = pass_obj._create_cse_signature(node1)
-        sig2 = pass_obj._create_cse_signature(node2)
+        sig1 = create_cse_signature(node1)
+        sig2 = create_cse_signature(node2)
         
         # Different control deps = different signatures
         self.assertNotEqual(sig1, sig2)
     
     def test_cse_signature_same_inputs_same_sig(self):
         """Test same inputs produce same signature - positive case."""
-        pass_obj = BasePass(name="TestPass")
-        
         node1 = create_node("Add", "add1", inputs=["a", "b"])
         node2 = create_node("Add", "add2", inputs=["a", "b"])
         
-        sig1 = pass_obj._create_cse_signature(node1)
-        sig2 = pass_obj._create_cse_signature(node2)
+        sig1 = create_cse_signature(node1)
+        sig2 = create_cse_signature(node2)
         
         # Same inputs = same signature
         self.assertEqual(sig1, sig2)
