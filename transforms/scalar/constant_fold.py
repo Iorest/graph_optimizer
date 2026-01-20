@@ -97,17 +97,9 @@ class ConstantFoldPass(PatternRewritePass):
         try:
             from tensorflow.python.framework import tensor_util
 
-            dtypes = []
-            for inp_name in inputs:
-                # Look up node
-                inp = optimizer.nodes[inp_name]
-                dtype_attr = inp.attr.get("dtype", None)
-                if dtype_attr is None:
-                    return None
-                tf_dtype = dtype_attr.type
-                dtypes.append(tf_dtype)
-            dtype = dtypes[0]
+            # Extract arrays and their dtypes
             arrays = []
+            input_dtypes = []
             for inp_name in inputs:
                 inp = optimizer.nodes[inp_name]
                 value_attr = inp.attr.get("value", None)
@@ -116,6 +108,18 @@ class ConstantFoldPass(PatternRewritePass):
                 tensor = value_attr.tensor
                 arr = tensor_util.MakeNdarray(tensor)
                 arrays.append(arr)
+                input_dtypes.append(arr.dtype)
+
+            # Determine result dtype using numpy promotion rules
+            try:
+                if len(input_dtypes) > 1:
+                    res_dtype = np.result_type(*input_dtypes)
+                elif len(input_dtypes) == 1:
+                    res_dtype = input_dtypes[0]
+                else:
+                    return None
+            except Exception:
+                res_dtype = input_dtypes[0]
 
             op_type = op_node.op
 
@@ -131,9 +135,12 @@ class ConstantFoldPass(PatternRewritePass):
 
             def _div(x, y):
                 # Safety: check for division by zero to avoid inf/nan nodes
-                if np.any(y == 0):
-                    raise ValueError("Division by zero in constant folding")
-                return np.divide(x, y)
+                # If we want to allow them, we could just let numpy handle it.
+                # But usually it's safer to avoid folding into Inf/NaN if it might crash later.
+                # However, for robustness, maybe we should allow it if numpy does.
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    res = np.divide(x, y)
+                return res
 
             def _neg(x):
                 return np.negative(x)
@@ -184,19 +191,22 @@ class ConstantFoldPass(PatternRewritePass):
                 return np.expm1(x)
 
             def _log(x):
-                return np.log(x)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    return np.log(x)
 
             def _log1p(x):
                 return np.log1p(x)
 
             def _sqrt(x):
-                return np.sqrt(x)
+                with np.errstate(invalid="ignore"):
+                    return np.sqrt(x)
 
             def _pow(x, y):
                 return np.power(x, y)
 
             def _rsqrt(x):
-                return 1.0 / np.sqrt(x)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    return 1.0 / np.sqrt(x)
 
             def _square(x):
                 return np.square(x)
@@ -315,6 +325,22 @@ class ConstantFoldPass(PatternRewritePass):
                 else:
                     return None
 
+            # Ensure result has the expected promoted dtype if necessary
+            # For some ops like Equal, the result is always bool, we don't force res_dtype.
+            if op_type not in (
+                "Equal",
+                "NotEqual",
+                "Less",
+                "Greater",
+                "LessEqual",
+                "GreaterEqual",
+                "LogicalAnd",
+                "LogicalOr",
+                "LogicalNot",
+            ):
+                if result.dtype != res_dtype:
+                    result = result.astype(res_dtype)
+
             new_const = create_const_node(
                 name=f"{op_node.name}_folded",
                 value=result.tolist(),
@@ -324,5 +350,8 @@ class ConstantFoldPass(PatternRewritePass):
             return RewriteResult(
                 new_nodes=[new_const], node_mapping={op_node.name: new_const.name}
             )
-        except Exception:
+        except Exception as e:
+            import logging as py_logging
+
+            py_logging.error(f"Error folding {op_node.name}: {e}")
             return None

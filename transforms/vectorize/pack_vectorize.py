@@ -426,21 +426,23 @@ HOIST_CONFIGS: Dict[str, OpHoistConfig] = {
         category=OpCategory.DIMENSION,
         main_input_idx=0,
         shape_preserving=False,
-        needs_axis_adjust=True,  # 预留功能，当前未实现
+        needs_axis_adjust=True,
         axis_attr_name="squeeze_dims",
     ),
     "ExpandDims": OpHoistConfig(
         op_type="ExpandDims",
         category=OpCategory.DIMENSION,
         main_input_idx=0,
-        other_inputs={1: InputStrategy.ADJUST},  # axis 需要调整（预留）
+        other_inputs={1: InputStrategy.ADJUST},
         shape_preserving=False,
+        needs_axis_adjust=True,
+        axis_attr_name="axis",
     ),
     "Transpose": OpHoistConfig(
         op_type="Transpose",
         category=OpCategory.DIMENSION,
         main_input_idx=0,
-        other_inputs={1: InputStrategy.ADJUST},  # perm 需要调整（预留）
+        other_inputs={1: InputStrategy.ADJUST},
         shape_preserving=False,
     ),
 }
@@ -809,6 +811,8 @@ class PackVectorizePass(PatternRewritePass):
             logging.debug(
                 f"[{self.name}] Inherited pack_axis_from_end={ha.pack_axis_from_end} for {pack_node.name}"
             )
+        elif ha.pack_axis < 0:
+            ha.pack_axis_from_end = ha.pack_axis
         elif ha.original_pack_output_shape:
             ndim = len(ha.original_pack_output_shape)
             ha.pack_axis_from_end = ha.pack_axis - ndim  # 转为负索引
@@ -836,6 +840,7 @@ class PackVectorizePass(PatternRewritePass):
     def _fail(self, ha: HoistAnalysis, reason: str) -> HoistAnalysis:
         """设置失败原因并返回"""
         ha.reason = reason
+        logging.debug(f"[{self.name}] Hoisting analysis failed: {reason}")
         return ha
 
     def _validate_branches(
@@ -1032,10 +1037,11 @@ class PackVectorizePass(PatternRewritePass):
             # 根据分支输出维度计算新的 pack axis
             ndim = len(branch_shape) + 1  # Pack 后维度 +1
             analysis.output_batch_axis = ndim + analysis.pack_axis_from_end
-            # 确保 axis 有效
-            analysis.output_batch_axis = max(
-                0, min(analysis.output_batch_axis, ndim - 1)
-            )
+            # 确保 axis 在合法范围内，建议保留负索引如果原来就是负的
+            if analysis.pack_axis < 0 and -ndim <= analysis.pack_axis < 0:
+                analysis.output_batch_axis = analysis.pack_axis
+            else:
+                analysis.output_batch_axis = max(0, min(analysis.output_batch_axis, ndim - 1))
 
             analysis.batched_output_shape = insert_batch_dim(
                 branch_shape, analysis.output_batch_axis, n
@@ -1086,9 +1092,17 @@ class PackVectorizePass(PatternRewritePass):
             )
 
         elif strategy == InputStrategy.ADJUST:
-            # ADJUST 策略为预留功能，当前未实现参数调整逻辑
-            # 无论 is_shared 如何，都返回 incompatible 跳过这些 Op
-            result.action = "incompatible"
+            if result.is_shared:
+                name = nodes[0]
+                node = optimizer.nodes.get(name)
+                if node and node.op == "Const":
+                    val = get_attr_value(node.attr.get("value"))
+                    result.const_value = val
+                    result.action = "adjust"
+                else:
+                    result.action = "incompatible"
+            else:
+                result.action = "incompatible"
 
         elif strategy in (InputStrategy.BROADCAST, InputStrategy.BROADCAST_OR_PACK):
             if result.is_shared:
@@ -1184,6 +1198,29 @@ class PackVectorizePass(PatternRewritePass):
                     )
 
         return result
+
+    def _adjust_axis(self, axis, batch_axis: int, input_rank: int):
+        """调整 axis 参数以适应新插入的 batch 维度"""
+        import numpy as np
+
+        def _adjust_single(a, b_axis, r):
+            if a < 0:
+                a = r + a
+            if a >= b_axis:
+                return int(a + 1)
+            return int(a)
+
+        if isinstance(axis, (int, np.integer)):
+            return _adjust_single(axis, batch_axis, input_rank)
+        elif isinstance(axis, (list, tuple, (np.ndarray if 'np' in dir() else list))):
+            return [_adjust_single(a, batch_axis, input_rank) for a in axis]
+        return axis
+
+    def _adjust_perm(self, perm: List[int], batch_axis: int) -> List[int]:
+        """专门为 Transpose 调整 perm，插入并保持 batch 维度位置"""
+        new_perm = [int(v if v < batch_axis else v + 1) for v in perm]
+        new_perm.insert(batch_axis, batch_axis)
+        return new_perm
 
     def _can_merge_packs(self, optimizer, pack_node, others, expected_inputs) -> bool:
         """检查其他消费者是否是可合并的 Pack"""
@@ -1413,6 +1450,21 @@ class PackVectorizePass(PatternRewritePass):
                     )
                 else:
                     other_inputs[idx] = pack_output
+            elif info.action == "adjust":
+                # 调整维度参数（如 ExpandDims 的 axis 或 Transpose 的 perm）
+                old_val = info.const_value
+                input_rank = len(analysis.main_input_shape) if analysis.main_input_shape is not None else 3
+                
+                if config.op_type == "Transpose":
+                    new_val = self._adjust_perm(old_val, analysis.output_batch_axis)
+                else:
+                    new_val = self._adjust_axis(old_val, analysis.output_batch_axis, input_rank)
+
+                # 创建新的常量节点
+                name = self.make_unique_node_name(pack_node.name, "AdjustedConst")
+                dtype = get_dtype_from_node(optimizer, info.nodes[0])
+                new_nodes.append(create_const_node(name, new_val, dtype))
+                other_inputs[idx] = name
             else:
                 # 'const'：所有分支使用相同常量，直接使用第一个节点
                 other_inputs[idx] = info.nodes[0]
@@ -1441,7 +1493,28 @@ class PackVectorizePass(PatternRewritePass):
                     "_output_shapes",
                     "shape",
                 }:
-                    attrs[config.attr_transform.get(name, name)] = val
+                    attr_name = config.attr_transform.get(name, name)
+                    if config.needs_axis_adjust and name == config.axis_attr_name:
+                        # 调整属性中的 axis（如 Squeeze 的 squeeze_dims）
+                        input_rank = len(analysis.main_input_shape) if analysis.main_input_shape is not None else 3
+                        val = first_op.attr.get(name)
+                        if val.WhichOneof("value") == "list":
+                            old_axis = list(val.list.i)
+                        else:
+                            old_axis = get_attr_value(val)
+                        new_axis = self._adjust_axis(old_axis, analysis.output_batch_axis, input_rank)
+                        
+                        # Pack value back into AttrValue
+                        new_attr = attr_value_pb2.AttrValue()
+                        if isinstance(new_axis, int):
+                            new_attr.i = new_axis
+                        else:
+                            # Handle list of ints (e.g. squeeze_dims)
+                            for v in new_axis:
+                                new_attr.list.i.append(int(v))
+                        attrs[attr_name] = new_attr
+                    else:
+                        attrs[attr_name] = val
 
             # 对于 pack_transpose 模式，输出 shape 是 [N, batch, D]
             if analysis.needs_final_transpose and analysis.batched_output_shape:

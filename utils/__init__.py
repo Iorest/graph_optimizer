@@ -16,6 +16,7 @@ from .graph_utils import (
     save_graph,
     load_graph,
     SubgraphBuilder,
+    make_output_shapes_attr,
 )
 from .generators import create_complex_concat_graph
 from .logger import logger
@@ -39,6 +40,7 @@ __all__ = [
     "save_graph",
     "load_graph",
     "SubgraphBuilder",
+    "make_output_shapes_attr",
     # generators
     "create_complex_concat_graph",
     # logger

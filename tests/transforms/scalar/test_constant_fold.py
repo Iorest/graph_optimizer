@@ -99,6 +99,65 @@ class ConstantFoldPassTest(unittest.TestCase):
         add_nodes = [n for n in optimizer.graph_def.node if n.name == "add"]
         self.assertEqual(len(add_nodes), 1)
 
+    def test_dtype_promotion(self):
+        const_a = create_const_node("a", value=[2], dtype="int32", shape=[1])
+        const_b = create_const_node("b", value=[4.5], dtype="float32", shape=[1])
+        add = create_node("Add", name="add", inputs=["a", "b"])
+        graph = self.create_graph([const_a, const_b, add])
+
+        optimizer = GraphOptimizer(graph)
+        fold_pass = ConstantFoldPass()
+        fold_pass.transform(
+            optimizer, auto_cleanup=True, protected_nodes=["add_folded"]
+        )
+
+        folded = [n for n in optimizer.graph_def.node if n.name == "add_folded"]
+        self.assertEqual(len(folded), 1)
+        # Result should be float32 or float64 (promoted)
+        dtype = folded[0].attr["dtype"].type
+        self.assertIn(tf.as_dtype(dtype).name, ["float32", "float64"])
+
+    def test_div_zero_fold(self):
+        const_a = create_const_node("a", value=[2.0], dtype="float32", shape=[1])
+        const_b = create_const_node("b", value=[0.0], dtype="float32", shape=[1])
+        div = create_node("Div", name="div", inputs=["a", "b"])
+        graph = self.create_graph([const_a, const_b, div])
+
+        optimizer = GraphOptimizer(graph)
+        fold_pass = ConstantFoldPass()
+        # Now it should fold to Inf instead of crashing or skipping
+        fold_pass.transform(
+            optimizer, auto_cleanup=True, protected_nodes=["div_folded"]
+        )
+
+        folded = [n for n in optimizer.graph_def.node if n.name == "div_folded"]
+        self.assertEqual(len(folded), 1)
+        import numpy as np
+        from tensorflow.python.framework import tensor_util
+
+        arr = tensor_util.MakeNdarray(folded[0].attr["value"].tensor)
+        self.assertTrue(np.isinf(arr[0]))
+
+    def test_sqrt_negative(self):
+        const_a = create_const_node("a", value=[-1.0], dtype="float32", shape=[1])
+        sqrt = create_node("Sqrt", name="sqrt", inputs=["a"])
+        graph = self.create_graph([const_a, sqrt])
+
+        optimizer = GraphOptimizer(graph)
+        fold_pass = ConstantFoldPass()
+        # Should fold to NaN
+        fold_pass.transform(
+            optimizer, auto_cleanup=True, protected_nodes=["sqrt_folded"]
+        )
+
+        folded = [n for n in optimizer.graph_def.node if n.name == "sqrt_folded"]
+        self.assertEqual(len(folded), 1)
+        import numpy as np
+        from tensorflow.python.framework import tensor_util
+
+        arr = tensor_util.MakeNdarray(folded[0].attr["value"].tensor)
+        self.assertTrue(np.isnan(arr[0]))
+
 
 if __name__ == "__main__":
     unittest.main()

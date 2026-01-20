@@ -109,6 +109,24 @@ def create_const_node(name: str, value, dtype: str, shape: list = None):
     return node
 
 
+def make_output_shapes_attr(shapes: List[List[int]]) -> attr_value_pb2.AttrValue:
+    """
+    Creates an AttrValue proto for _output_shapes.
+
+    Args:
+        shapes: List of shapes, where each shape is a list of integers.
+
+    Returns:
+        attr_value_pb2.AttrValue: The formatted attribute
+    """
+    attr = attr_value_pb2.AttrValue()
+    for shape in shapes:
+        shape_proto = attr.list.shape.add()
+        for dim in shape:
+            shape_proto.dim.add().size = dim
+    return attr
+
+
 # =======================
 # Graph Analysis Utilities
 # =======================
@@ -199,9 +217,17 @@ def update_node_inputs(
         if not is_control and ":" in input_name:
             port = ":" + input_name.split(":", 1)[1]
 
-        if base_name in node_mapping:
-            new_base = node_mapping[base_name]
-            new_input = f"^{new_base}" if is_control else f"{new_base}{port}"
+        # Resolve transitively to handle multiple replacements in a single iteration
+        target_base = base_name
+        visited = {target_base}
+        while target_base in node_mapping:
+            target_base = node_mapping[target_base]
+            if target_base in visited:  # Safeguard against circular mapping
+                break
+            visited.add(target_base)
+
+        if target_base != base_name:
+            new_input = f"^{target_base}" if is_control else f"{target_base}{port}"
             updated_inputs.append(new_input)
             if is_control:
                 existing_controls.add(new_input)
