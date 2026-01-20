@@ -1,20 +1,30 @@
-"""
-Comprehensive tests for Common Subexpression Elimination (CSE) Pass.
+'''
+Common Subexpression Elimination (CSE) Tests
+=============================================
 
-Tests cover:
-1. Basic duplicate elimination
-2. Const node deduplication  
-3. Control dependencies preservation
-4. Multi-port outputs
-5. Iterative convergence
-6. Skip ops (Placeholder, Variable, Identity)
-7. Edge cases (empty graph, single node, no duplicates)
-"""
+测试内容：
+1. test_basic_duplicate_elimination    - 基本重复节点消除
+2. test_const_duplicate_elimination    - Const 节点去重（相同值+dtype）
+3. test_const_different_dtype          - Const 不同 dtype 不合并
+4. test_control_dep_preservation       - 控制依赖保留
+5. test_multi_port_output              - 多端口输出节点处理
+6. test_iterative_convergence          - 级联去重（多轮迭代）
+7. test_skip_placeholder               - 跳过 Placeholder
+8. test_skip_variable                  - 跳过 Variable
+9. test_skip_identity                  - 跳过 Identity（由专门 Pass 处理）
+10. test_empty_graph                   - 空图处理
+11. test_single_node                   - 单节点图处理
+12. test_no_duplicates                 - 无重复图处理
+
+覆盖场景：
+- 基本去重、Const 特殊处理、控制依赖
+- 有状态操作跳过、边界条件
+'''
 
 import unittest
 import tensorflow.compat.v1 as tf
 from graph_optimizer.core import GraphOptimizer
-from graph_optimizer.optimizers.common_subexpression_elimination import CommonSubexpressionElimination
+from graph_optimizer.transforms.scalar import CSEPass
 from graph_optimizer.utils import create_node
 from tensorflow.core.framework import attr_value_pb2
 
@@ -22,7 +32,7 @@ tf.disable_v2_behavior()
 
 
 class TestCSE(unittest.TestCase):
-    """Test suite for Common Subexpression Elimination."""
+    """CSE 测试套件。"""
     
     def create_graph(self, nodes):
         """Helper to create a GraphDef from node list."""
@@ -59,7 +69,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -81,7 +91,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -102,7 +112,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -126,7 +136,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -161,7 +171,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -194,7 +204,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -223,7 +233,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -249,7 +259,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -270,7 +280,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -285,7 +295,7 @@ class TestCSE(unittest.TestCase):
         """Test 10: Empty graph should not crash."""
         graph_def = self.create_graph([])
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         cse_pass.transform(optimizer)
         
@@ -297,7 +307,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -317,7 +327,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -337,7 +347,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -361,7 +371,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         cse_pass.transform(optimizer)
         
@@ -395,7 +405,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -430,7 +440,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         cse_pass.transform(optimizer)
         
@@ -459,7 +469,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -491,7 +501,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -517,7 +527,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -544,7 +554,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -567,7 +577,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         # Protect weights_2 - it should not be removed
@@ -600,7 +610,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         # Protect const_b - it should become the canonical node
@@ -628,7 +638,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         # Protect three of the const nodes
         cse_pass.transform(optimizer, protected_nodes=[
@@ -658,7 +668,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -684,7 +694,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -706,7 +716,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -727,7 +737,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -751,7 +761,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -772,7 +782,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         # Empty list should behave same as None
@@ -805,7 +815,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)
@@ -832,7 +842,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         import time
         start = time.time()
@@ -855,7 +865,7 @@ class TestCSE(unittest.TestCase):
         
         graph_def = self.create_graph(nodes)
         optimizer = GraphOptimizer(graph_def)
-        cse_pass = CommonSubexpressionElimination()
+        cse_pass = CSEPass()
         
         initial_count = len(optimizer.nodes)
         cse_pass.transform(optimizer)

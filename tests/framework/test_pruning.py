@@ -1,3 +1,18 @@
+"""
+Pruning Tests - 图裁剪测试
+===========================
+
+测试内容：
+1. test_fundamental_pruning   - 基础图裁剪（删除无用节点）
+2. test_reference_counts      - 引用计数计算
+3. test_preserve_placeholders - Placeholder 节点保留（即使无引用）
+
+验证 GraphOptimizer.prune() 的正确性：
+- 从输出节点反向遍历，保留可达节点
+- 删除不可达的死代码
+- 特殊保留 Placeholder（作为图输入）
+"""
+
 import unittest
 import tensorflow.compat.v1 as tf
 from graph_optimizer.core import GraphOptimizer
@@ -7,6 +22,7 @@ tf.disable_v2_behavior()
 
 
 class TestPruning(unittest.TestCase):
+    """图裁剪测试套件。"""
     def setUp(self):
         tf.reset_default_graph()
 

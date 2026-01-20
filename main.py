@@ -8,15 +8,15 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from . import optimizers  # Register all passes
+    from . import transforms  # Register all passes
     from .utils.logger import logger as custom_logger
 except ImportError:
     # Direct execution fallback
-    import graph_optimizer.optimizers as optimizers
+    import graph_optimizer.transforms as transforms
     from graph_optimizer.utils.logger import logger as custom_logger
 
 # Prevent unused import warning
-_ = optimizers
+_ = transforms
 
 
 def main():

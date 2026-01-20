@@ -1,3 +1,19 @@
+"""
+Variadic Alias Tests - Variadic 模式别名测试
+=============================================
+
+测试内容：
+1. test_variadic_alias_collection - Variadic 匹配结果收集到别名
+
+Variadic 模式用于匹配可变数量的输入：
+    模式: Op("ConcatV2", Variadic(Op("Const"), alias="my_inputs"), alias="root")
+    节点: ConcatV2(c1, c2, c3)
+    
+    匹配后: match.matched_nodes["my_inputs"] = [c1, c2, c3]
+
+这对于处理 ConcatV2、Pack 等可变输入数量的操作非常重要。
+"""
+
 import unittest
 import tensorflow.compat.v1 as tf
 from graph_optimizer.core import (
@@ -11,6 +27,7 @@ tf.disable_v2_behavior()
 
 
 class TestVariadicAlias(unittest.TestCase):
+    """Variadic 别名收集测试套件。"""
     def test_variadic_alias_collection(self):
         """Test that Variadic(..., alias="name") collects a list of nodes."""
         graph_def = tf.GraphDef()

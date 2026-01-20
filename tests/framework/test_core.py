@@ -1,3 +1,18 @@
+"""
+Core Engine Tests - 核心引擎基础功能测试
+=========================================
+
+测试内容：
+1. test_node_lookup          - 节点查找和追踪
+2. test_commutative_matching - 交换律操作符匹配（Add(x,c) == Add(c,x)）
+3. test_variadic_matching    - 可变参数输入匹配（ConcatV2 多输入）
+4. test_control_dependency_handling - 控制依赖处理（^node 跳过匹配但保留）
+
+依赖：
+- GraphOptimizer : 核心优化器
+- Op, Any, CommutativeOp, Variadic : 模式匹配原语
+"""
+
 import unittest
 import tensorflow.compat.v1 as tf
 from graph_optimizer.core import (
@@ -13,6 +28,7 @@ tf.disable_v2_behavior()
 
 
 class TestCoreEngine(unittest.TestCase):
+    """GraphOptimizer 核心引擎基础功能测试套件。"""
     def setUp(self):
         tf.reset_default_graph()
 

@@ -22,8 +22,8 @@ from .utils import (
 from .runner import OptimizationPipeline
 from .utils.logger import set_log_level, DEBUG, INFO, WARNING, ERROR
 
-# Import optimizers to register all passes
-from . import optimizers
+# Import transforms to register all passes
+from . import transforms
 
 __all__ = [
     "GraphOptimizer",

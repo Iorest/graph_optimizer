@@ -1,9 +1,3 @@
-from .graph_io import (
-    create_node,
-    save_graph,
-    load_graph,
-    SubgraphBuilder,
-)
 from .graph_utils import (
     extract_base_name,
     clean_input_name,
@@ -16,17 +10,17 @@ from .graph_utils import (
     check_external_consumers,
     log_external_consumer_warning,
     build_consumer_index,
+    # I/O functions from former graph_io
+    create_node,
+    create_const_node,
+    save_graph,
+    load_graph,
+    SubgraphBuilder,
 )
 from .generators import create_complex_concat_graph
 from .logger import logger
-from .visualize import export_to_dot, save_dot
 
 __all__ = [
-    # graph_io
-    "create_node",
-    "save_graph",
-    "load_graph",
-    "SubgraphBuilder",
     # graph_utils
     "extract_base_name",
     "clean_input_name",
@@ -39,11 +33,14 @@ __all__ = [
     "check_external_consumers",
     "log_external_consumer_warning",
     "build_consumer_index",
+    # I/O functions
+    "create_node",
+    "create_const_node",
+    "save_graph",
+    "load_graph",
+    "SubgraphBuilder",
     # generators
     "create_complex_concat_graph",
     # logger
-    "logger",
-    # visualize
-    "export_to_dot",
-    "save_dot",
+    "logger"
 ]

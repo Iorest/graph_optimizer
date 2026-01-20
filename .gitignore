@@ -19,6 +19,7 @@ venv/
 *.pbtxt
 *.log
 run_*/
+outputs/
 timeline*.json
 debug_graphs/
 .DS_Store

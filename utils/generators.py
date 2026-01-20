@@ -1,5 +1,5 @@
 import tensorflow.compat.v1 as tf
-from .graph_io import create_node
+from .graph_utils import create_node
 from tensorflow.core.framework import attr_value_pb2, tensor_shape_pb2
 
 tf.disable_v2_behavior()
@@ -218,6 +218,6 @@ def create_complex_concat_graph(
     graph_def.node.extend([ctrl, output])
 
     # Save to file
-    from .graph_io import save_graph
+    from .graph_utils import save_graph
 
     save_graph(graph_def, output_path)

@@ -31,7 +31,7 @@ fi
 
 # 2. Run Pass Tests
 echo -e "\n[2/3] Running Pass Tests..."
-$PYTHON_EXE -m unittest discover "$SCRIPT_DIR/tests/passes" -v
+$PYTHON_EXE -m unittest discover "$SCRIPT_DIR/tests/transforms" -v
 if [ $? -ne 0 ]; then
     echo "ERROR: Pass tests failed!"
     exit 1

@@ -1,3 +1,20 @@
+"""
+Infrastructure Tests - 基础设施测试
+====================================
+
+测试内容：
+1. test_pipeline_and_rollback - OptimizationPipeline 执行和 Pass 失败回滚
+
+验证：
+- Pass 执行失败时自动回滚到前一个稳定状态
+- 后续 Pass 继续执行
+- 最终输出图不包含失败 Pass 的改动
+
+Mock Passes：
+- MockFailingPass  : 模拟失败的 Pass（添加节点后抛异常）
+- MockSuccessPass  : 模拟成功的 Pass（正常添加节点）
+"""
+
 import unittest
 import os
 import tensorflow.compat.v1 as tf

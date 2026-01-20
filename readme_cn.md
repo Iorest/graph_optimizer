@@ -17,18 +17,21 @@ Graph Optimizer 是一个基于模式匹配的 TensorFlow `GraphDef` 离线优�
 ## 项目结构
 
 ```mermaid
-graph TD
+ graph TD
     Root[graph_optimizer] --> Core[core.py: 核心引擎与匹配逻辑]
     Root --> Runner[runner.py: 流水线执行引擎]
     Root --> Utils[utils/: 辅助工具集]
     Utils --> Log[logger.py: 统一日志系统]
     Utils --> IO[graph_io.py: 图 I/O 与节点创建]
     Utils --> Gen[generators.py: 测试图生成器]
-    Root --> Opts[optimizers/: 插件化优化器]
-    Opts --> CF[concat_fusion.py: Concat 融合 Pass]
-    Opts --> IR[identity_removal.py: Identity 移除 Pass]
-    Opts --> CSE[common_subexpression_elimination.py: CSE Pass]
-    Opts --> PH[pack_hoisting.py: Pack 提升 Pass]
+    Root --> Transforms[transforms/: 优化 Pass，遵循 LLVM 风格分类]
+    Transforms --> Scalar[scalar/: 标量级优化]
+    Scalar --> IdentityElim[identity_elim.py: Identity 消除 Pass]
+    Scalar --> CSE[cse.py: 公共子表达式消除 Pass]
+    Transforms --> Combine[combine/: 组合优化]
+    Combine --> ConcatCombine[concat_combine.py: Concat 合并 Pass]
+    Transforms --> Vectorize[vectorize/: 向量化优化]
+    Vectorize --> PackVectorize[pack_vectorize.py: Pack 向量化 Pass]
     Root --> Tests[tests/: 模块化单元测试]
     Root --> Demos[demos/: 示例程序]
 ```
@@ -57,7 +60,7 @@ python3 demos/run_demo.py
 你可以通过继承 `PatternRewritePass` 并使用 `PassRegistry` 轻松创建自定义优化器：
 
 ```python
-from graph_optimizer import Op, create_node, PassRegistry, PatternRewritePass
+from graph_optimizer.core import Op, create_node, PassRegistry, PatternRewritePass
 
 @PassRegistry.register("my_optimization", opt_level=1, priority=10)
 class MyOptimizationPass(PatternRewritePass):
@@ -99,10 +102,9 @@ pipeline.run()
 框架通过 `PassRegistry` 统一管理所有优化规则。在注册 Pass 时，有两个核心参数：
 
 - **`opt_level` (优化等级)**：
-
   - 用于对优化 Pass 进行分类。通常情况下：
-    - **Level 1**：极高安全性的优化（如移除无意义的 Identity 节点）。
-    - **Level 2**：更积极的优化（如多个 Concat 算子融合）。
+    - **Level 1**：极高安全性的优化（如 `identity_elim`）。
+    - **Level 2**：更积极的优化（如 `concat_combine`、`pack_vectorize`）。
   - 执行 `OptimizationPipeline` 时，指定的等级越高，包含的优化 Pass 越多（包含所有小于或等于该等级的 Pass）。
 
 - **`priority` (优先级)**：
@@ -110,10 +112,48 @@ pipeline.run()
   - **数值越小，执行越早**。
   - 某些 Pass 可能依赖于其他 Pass 的执行结果，此时优先级就显得尤为重要。
 
+### 已注册的 Pass
+
+| Pass 名称            | 类别      | 说明                                 |
+| -------------------- | --------- | ------------------------------------ |
+| `identity_elim`      | scalar    | 移除冗余 Identity 节点并进行旁路消除 |
+| `cse`                | scalar    | 消除重复的子表达式                   |
+| `constant_fold`      | scalar    | 常量折叠：预计算全常量输入的算子     |
+| `algebraic_simplify` | scalar    | 代数化简：应用代数恒等式简化计算图   |
+| `concat_combine`     | combine   | 融合连续的 Concat 操作               |
+| `pack_vectorize`     | vectorize | 提升 Pack 操作以支持批量执行         |
+
+Pass 名称采用下划线（LLVM 风格），不再使用连字符。
+
 ## 关键模块详述
 
 - **`core.py`**：核心引擎，定义了 `GraphOptimizer` 类和基础模式匹配语言。
 - **`runner.py`**：提供 `OptimizationPipeline` 类，用于串联多个 Pass 执行。
 - **`utils/`**：底层工具集，包含日志、图读写和测试数据生成。
-- **`optimizers/`**：存放经过验证的常用优化 Pass。
+- **`transforms/`**：存放经过验证的常用优化 Pass，按 LLVM 风格分为：
+  - `scalar/` – 标量级优化（如 identity 消除、CSE）
+  - `combine/` – 组合优化（如 concat 合并）
+  - `vectorize/` – 向量化优化（如 pack 提升）
 - **`run_test.sh`**：集成回归测试脚本。
+
+## 日志统计
+
+优化器提供详细的逐 Pass 与整体统计信息，帮助分析性能与优化效果：
+
+- **逐 Pass 指标**：执行迭代数、修改节点数、节点数变化、耗时。
+- **整体摘要**：执行的总 Pass 数、总耗时、初始/最终节点数、削减百分比。
+
+示例输出：
+
+```
+IdentityElimination               3       68    2603 -> 2535   0.054s
+CSE                              12      770    2535 -> 1765   0.081s
+ConcatCombine                     2        1    1765 -> 1763   0.010s
+PackVectorize                    10      531    1763 -> 1284   0.114s
+Total passes executed: 4
+Total time: 0.266s
+Nodes: 2603 -> 1284 (removed: 1319)
+Reduction: 50.7%
+```
+
+这些日志会写入 `outputs/run_<timestamp>/optimization.log`，并在运行流水线时打印到标准输出。

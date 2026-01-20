@@ -1,3 +1,19 @@
+"""
+Control Dependency Loss Tests - 控制依赖丢失测试
+=================================================
+
+测试内容：
+1. test_internal_control_dep_preservation - 内部节点控制依赖保留
+
+场景：
+    原图: A -> Identity(B, ^C)
+    模式: Op("Identity", Op("Identity", alias="inner"), alias="root")
+    
+    当 rewriter 替换 root 时，inner 上的 ^C 必须被保留到新节点。
+    
+这是回归测试，确保 framework 在 rewrite 时正确收集和应用控制依赖。
+"""
+
 import unittest
 import tensorflow.compat.v1 as tf
 from graph_optimizer.core import (
@@ -11,6 +27,7 @@ tf.disable_v2_behavior()
 
 
 class TestControlDepLoss(unittest.TestCase):
+    """控制依赖保留测试套件。"""
     def test_internal_control_dep_preservation(self):
         """
         Test that control dependencies on internal nodes of a match are preserved.
