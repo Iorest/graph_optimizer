@@ -6,6 +6,8 @@ including I/O and analysis, extracted from GraphOptimizer to improve modularity
 and reusability.
 """
 
+from functools import lru_cache
+
 import os
 import collections
 import numpy as np
@@ -132,6 +134,7 @@ def make_output_shapes_attr(shapes: List[List[int]]) -> attr_value_pb2.AttrValue
 # =======================
 
 
+@lru_cache(maxsize=None)
 def extract_base_name(input_name: str) -> str:
     """
     Extract base node name from input (strip port and control marker).

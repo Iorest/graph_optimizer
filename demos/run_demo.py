@@ -8,6 +8,7 @@ sys.path.insert(0, parent_dir)
 import tensorflow.compat.v1 as tf
 import numpy as np
 from graph_optimizer.utils import load_graph, create_node, create_complex_concat_graph
+from graph_optimizer.utils import create_complex_concat_graph
 from graph_optimizer.runner import OptimizationPipeline
 from graph_optimizer.utils.logger import set_log_level, DEBUG, INFO
 
