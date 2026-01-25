@@ -59,5 +59,75 @@ class TestConcatCombine(unittest.TestCase):
         self.assertNotIn("inner", node_map)
 
 
+    def test_concat_combine_with_control_dependency(self):
+        """
+        Test that control dependencies from an inner, fused ConcatV2 node are
+        correctly hoisted to the new combined ConcatV2 node.
+        """
+        graph_def = tf.GraphDef()
+        axis0 = self._create_const("axis0", 0)
+        ctrl_op = create_node("NoOp", "ctrl_op")
+        a = create_node("Placeholder", "a")
+        b = create_node("Placeholder", "b")
+        # Inner concat has a control dependency
+        inner = create_node("ConcatV2", "inner", inputs=["a", "b", "axis0", "^ctrl_op"])
+        c = create_node("Placeholder", "c")
+        outer = create_node("ConcatV2", "outer", inputs=["inner", "c", "axis0"])
+        graph_def.node.extend([axis0, ctrl_op, a, b, inner, c, outer])
+
+        optimizer = GraphOptimizer(graph_def)
+        # Protect 'outer' to avoid pruning it as it's a leaf
+        optimized = ConcatCombinePass().transform(optimizer, protected_nodes=["outer"])
+
+        node_map = {n.name: n for n in optimized.node}
+        self.assertIn("outer", node_map)
+        
+        # Verify inputs are combined correctly
+        outer_node = node_map["outer"]
+        # The order of control inputs is not guaranteed, so we check data and control inputs separately.
+        data_inputs = [inp for inp in outer_node.input if not inp.startswith('^')]
+        control_inputs = [inp for inp in outer_node.input if inp.startswith('^')]
+
+        self.assertEqual(data_inputs, ["a", "b", "c", "axis0"])
+        
+        # Verify the control dependency from the inner node was inherited
+        self.assertIn("^ctrl_op", control_inputs)
+        
+        # Verify the inner node was removed
+        self.assertNotIn("inner", node_map)
+
+    def test_outer_control_dep_bug(self):
+        """
+        Test that outer ConcatV2 with control dependencies is handled correctly.
+        """
+        graph_def = tf.GraphDef()
+        axis0 = self._create_const("axis0", 0)
+        ctrl_op = create_node("NoOp", "ctrl_op")
+        
+        a = create_node("Placeholder", "a")
+        b = create_node("Placeholder", "b")
+        c = create_node("Placeholder", "c")
+        
+        # inner = Concat([a, b], axis)
+        inner = create_node("ConcatV2", "inner", inputs=["a", "b", "axis0"])
+        inner.attr["N"].i = 2
+        
+        # outer = Concat([inner, c], axis) + ^ctrl_op
+        outer = create_node("ConcatV2", "outer", inputs=["inner", "c", "axis0", "^ctrl_op"])
+        outer.attr["N"].i = 2
+        
+        graph_def.node.extend([axis0, ctrl_op, a, b, c, inner, outer])
+        
+        optimizer = GraphOptimizer(graph_def)
+        ConcatCombinePass().transform(optimizer, protected_nodes=["outer"])
+        
+        new_outer = optimizer.nodes["outer"]
+        n_attr = new_outer.attr["N"].i
+        
+        # We expect N=3 (a, b, c).
+        self.assertEqual(n_attr, 3, f"Outer N attribute should be 3, got {n_attr}.")
+        self.assertIn("^ctrl_op", new_outer.input)
+
+
 if __name__ == "__main__":
     unittest.main()

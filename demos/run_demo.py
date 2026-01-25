@@ -199,6 +199,12 @@ def main():
     input_path = os.path.join(demo_dir, "graph_def_rankmixer.pb")
     output_path = os.path.join(demo_dir, "graph_def_rankmixer_optimized.pb")
 
+    # Generate graph if it doesn't exist
+    if not os.path.exists(input_path):
+        print(f"Graph file not found: {input_path}")
+        print("Generating complex concat graph for demo...")
+        create_complex_concat_graph(input_path)
+
     # Load original graph
     print("Loading original graph...")
     original_graph = load_graph(input_path)
@@ -212,7 +218,7 @@ def main():
         level=3,
         debug=True,  # 启用 debug 模式，生成 run_+时间 目录
         output_nodes=["predicts"],
-        protected_nodes=["compile_batch_size_ret"],
+        protected_nodes=[],
         remove_passes=[],  # 启用所有 passes
     )
     pipeline.run()

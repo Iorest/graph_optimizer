@@ -211,7 +211,7 @@ def create_complex_concat_graph(
     ctrl = create_node("NoOp", "ctrl_trigger")
     output = create_node(
         "Identity",
-        "output",
+        "predicts",
         inputs=["c4", "^ctrl_trigger"],
         attr={"T": make_attr_dtype(tf.float32.as_datatype_enum)},
     )

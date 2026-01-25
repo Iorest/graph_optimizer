@@ -592,6 +592,22 @@ class PatternMatcher:
                     if rewriter_output is not None:
                         result = RewriteResult.from_nodes(rewriter_output)
 
+                        # =========================================================
+                        # Automatic Control Dependency Handling
+                        # =========================================================
+                        # The framework automatically preserves control dependencies
+                        # from ALL nodes matched by the pattern (including inner nodes).
+                        #
+                        # 1. match.control_inputs collects all control deps from matched nodes.
+                        # 2. relevant_controls filters out internal deps (deps within the match).
+                        # 3. These deps are appended to the new replacement node.
+                        #
+                        # Pass authors generally do NOT need to manually copy control deps,
+                        # UNLESS the pass logic itself is sensitive to input list structure
+                        # (e.g., assuming inputs[-1] is axis), in which case explicit handling
+                        # is safer to avoid bugs.
+                        # =========================================================
+
                         # Preserve external control dependencies
                         internal_names = match.all_matched_nodes
                         relevant_controls = [
@@ -601,6 +617,21 @@ class PatternMatcher:
                         ]
 
                         if relevant_controls:
+                            # We need to decide where to put these control dependencies.
+                            # Priority:
+                            # 1. If the root node name is preserved in new_nodes, it will get them.
+                            # 2. If node_mapping rebinds consumers to an EXISTING node (not in new_nodes), 
+                            #    we MUST hoist to consumers.
+                            # 3. Otherwise, attach to the first new node.
+                            
+                            mapped_target = result.node_mapping.get(node.name)
+                            new_node_names = {n.name for n in result.new_nodes}
+                            
+                            # Case: consumers remapped to something else (existing or new)
+                            if mapped_target and mapped_target not in new_node_names:
+                                hoisted_controls_map[node.name].update(relevant_controls)
+                            
+                            # Case: new nodes created (may or may not be remapped)
                             if result.new_nodes:
                                 target_node = result.new_nodes[0]
                                 for new_node in result.new_nodes:
@@ -613,12 +644,10 @@ class PatternMatcher:
                                         if ci not in existing:
                                             target_node.input.append(ci)
                                             existing.add(ci)
-                            else:
-                                # Node replaced by an existing node (e.g. Add(x, 0) -> x)
-                                # We MUST hoist controls to all consumers of this node
-                                hoisted_controls_map[node.name].update(
-                                    relevant_controls
-                                )
+                            elif not mapped_target:
+                                # No new nodes and no mapping? This shouldn't happen in a valid rewrite
+                                # but as fallback, hoist to consumers of the replaced node.
+                                hoisted_controls_map[node.name].update(relevant_controls)
 
                         # Log replaced root node
                         logging.info(f"{prefix}Replaced: {node.name} (op: {node.op})")

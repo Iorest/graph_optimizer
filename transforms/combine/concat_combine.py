@@ -148,65 +148,89 @@ class ConcatCombinePass(PatternRewritePass):
         if axis_val is None:
             return None
 
-        new_inputs = []
+        # Separate root inputs into data, axis, and control
+        root_all_inputs = root.input
+        root_control_inputs = [i for i in root_all_inputs if i.startswith("^")]
+        root_data_inputs = [i for i in root_all_inputs if not i.startswith("^")]
+        
+        # ConcatV2 inputs are [values..., axis]. 
+        # Last data input is axis.
+        if not root_data_inputs:
+             return None
+             
+        root_axis_input = root_data_inputs[-1]
+        root_values_inputs = root_data_inputs[:-1]
+
+        new_values_inputs = []
+        new_control_inputs = set(root_control_inputs) # Use set to avoid duplicates
         changed = False
 
-        for input_name in root.input[:-1]:
+        for input_name in root_values_inputs:
             base_name = self.clean_input_name(input_name)
+            should_fuse = False
+            
             if base_name in optimizer.nodes:
                 input_node = optimizer.nodes[base_name]
                 if input_node.op == "ConcatV2":
                     logging.debug(f"[ConcatCombine] Found inner ConcatV2: {input_node.name}")
-                    if len(input_node.input) < 2:
-                        new_inputs.append(input_name)
-                        continue
+                    
+                    # Analyze inner inputs
+                    inner_all_inputs = input_node.input
+                    inner_control_inputs = [i for i in inner_all_inputs if i.startswith("^")]
+                    inner_data_inputs = [i for i in inner_all_inputs if not i.startswith("^")]
+                    
+                    if len(inner_data_inputs) >= 2:
+                        inner_axis_name = self.clean_input_name(inner_data_inputs[-1])
+                        inner_axis_node = optimizer.nodes.get(inner_axis_name)
+                        
+                        if inner_axis_node and inner_axis_node.op == "Const":
+                            inner_rank = optimizer.get_node_rank(input_node)
+                            raw_inner_axis = optimizer.get_node_attr(inner_axis_node, "value")
+                            inner_axis_val = optimizer.canonicalize_axis(raw_inner_axis, inner_rank)
 
-                    inner_axis_name = self.clean_input_name(input_node.input[-1])
-                    inner_axis_node = optimizer.nodes.get(inner_axis_name)
-                    if inner_axis_node and inner_axis_node.op == "Const":
-                        inner_rank = optimizer.get_node_rank(input_node)
-                        raw_inner_axis = optimizer.get_node_attr(
-                            inner_axis_node, "value"
-                        )
-                        inner_axis_val = optimizer.canonicalize_axis(
-                            raw_inner_axis, inner_rank
-                        )
-
-                        if inner_axis_val == axis_val:
-                            # Shape check for safety
-                            root_shape = optimizer.get_node_shape(root)
-                            inner_shape = optimizer.get_node_shape(input_node)
-
-                            if root_shape and inner_shape:
-                                if len(root_shape) != len(inner_shape):
-                                    new_inputs.append(input_name)
-                                    continue
+                            if inner_axis_val == axis_val:
+                                # Shape check
+                                root_shape = optimizer.get_node_shape(root)
+                                inner_shape = optimizer.get_node_shape(input_node)
+                                
                                 match_fail = False
-                                for i in range(len(root_shape)):
-                                    if i != axis_val:
-                                        if (
-                                            root_shape[i] != inner_shape[i]
-                                            and root_shape[i] != -1
-                                            and inner_shape[i] != -1
-                                        ):
-                                            match_fail = True
-                                            break
-                                if match_fail:
-                                    new_inputs.append(input_name)
-                                    continue
-
-                            new_inputs.extend(list(input_node.input[:-1]))
-                            changed = True
-                            continue
-            new_inputs.append(input_name)
+                                if root_shape and inner_shape:
+                                    if len(root_shape) != len(inner_shape):
+                                        match_fail = True
+                                    else:
+                                        for i in range(len(root_shape)):
+                                            if i != axis_val:
+                                                if (
+                                                    root_shape[i] != inner_shape[i]
+                                                    and root_shape[i] != -1
+                                                    and inner_shape[i] != -1
+                                                ):
+                                                    match_fail = True
+                                                    break
+                                
+                                if not match_fail:
+                                    should_fuse = True
+                                    # Add inner values (exclude axis)
+                                    new_values_inputs.extend(inner_data_inputs[:-1])
+                                    # Collect inner control deps
+                                    for ctrl in inner_control_inputs:
+                                        new_control_inputs.add(ctrl)
+            
+            if should_fuse:
+                changed = True
+            else:
+                new_values_inputs.append(input_name)
 
         if not changed:
             return None
 
-        new_inputs.append(root.input[-1])
-        new_node = create_node("ConcatV2", root.name, inputs=new_inputs, attr=root.attr)
-        new_node.attr["N"].i = len(new_inputs) - 1
-        logging.info(f"[ConcatCombine] Combined: {root.name} ({len(root.input)-1} -> {len(new_inputs)-1} inputs)")
+        # Reconstruct inputs: [new_values..., axis, new_controls...]
+        final_inputs = new_values_inputs + [root_axis_input] + sorted(list(new_control_inputs))
+        
+        new_node = create_node("ConcatV2", root.name, inputs=final_inputs, attr=root.attr)
+        new_node.attr["N"].i = len(new_values_inputs)
+        
+        logging.info(f"[ConcatCombine] Combined: {root.name} ({len(root_values_inputs)} -> {len(new_values_inputs)} value inputs)")
         return [new_node]
 
 

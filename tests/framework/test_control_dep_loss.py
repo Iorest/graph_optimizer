@@ -65,6 +65,46 @@ class TestControlDepLoss(unittest.TestCase):
             "Control dependency from internal node was lost!",
         )
 
+    def test_control_dep_preservation_with_mapping(self):
+        """
+        Test that control dependencies are preserved when using node_mapping.
+        Scenario: trigger -> add(x, zero) -> result
+        Rewrite: add -> x (bypass), result should now depend on trigger.
+        """
+        from graph_optimizer.core import RewriteResult
+
+        graph_def = tf.GraphDef()
+        x = create_node("Const", "x")
+        zero = create_node("Const", "zero")
+        trigger = create_node("NoOp", "trigger")
+        add = create_node("Add", "add", inputs=["x", "zero", "^trigger"])
+        result = create_node("Identity", "result", inputs=["add"])
+
+        graph_def.node.extend([x, zero, trigger, add, result])
+
+        optimizer = GraphOptimizer(graph_def)
+
+        # Define a rewriter that remaps add -> x and adds a side node
+        def rewriter(match, opt):
+            side = create_node("NoOp", "side")
+            return RewriteResult(
+                new_nodes=[side],
+                replaced_nodes=[],
+                node_mapping={"add": "x"}
+            )
+
+        pattern = Op("Add", Op("Const"), Op("Const"))
+        optimizer.add_transformation(pattern, rewriter)
+
+        # Optimize
+        optimized = optimizer.optimize(auto_cleanup=True, protected_nodes=["result"])
+        node_map = {n.name: n for n in optimized.node}
+        
+        result_node = node_map["result"]
+        self.assertIn("x", result_node.input)
+        self.assertIn("^trigger", result_node.input, 
+                      "Control dependency was lost during node remapping!")
+
 
 if __name__ == "__main__":
     unittest.main()
