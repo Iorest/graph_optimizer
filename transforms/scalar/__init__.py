@@ -17,10 +17,9 @@ Scalar Transforms - 标量/局部优化
 
 from .cse import CSEPass
 from .constant_fold import ConstantFoldPass
-from .algebraic_simplify import AlgebraicSimplifyPass
+from . import algebraic_simplify
 
 __all__ = [
     'CSEPass',
     'ConstantFoldPass',
-    'AlgebraicSimplifyPass',
 ]

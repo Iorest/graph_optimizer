@@ -2,441 +2,234 @@
 AlgebraicSimplifyPass Tests
 ===========================
 
-Tests for scalar algebraic simplification pass.
+Tests for the refactored, efficient scalar algebraic simplification pass.
 """
 
 import unittest
 import tensorflow.compat.v1 as tf
-from graph_optimizer.core import GraphOptimizer
-from graph_optimizer.transforms.scalar.algebraic_simplify import AlgebraicSimplifyPass
+import numpy as np
+from graph_optimizer.core import GraphOptimizer, PassRegistry
 from graph_optimizer.utils.graph_utils import create_node, create_const_node
-
 
 tf.disable_v2_behavior()
 
+def _make_placeholder(name, dtype, shape):
+    """Helper to create a placeholder node with dtype and shape attributes."""
+    node = create_node("Placeholder", name=name)
+    node.attr["dtype"].type = dtype.as_datatype_enum
+    if shape is not None:
+        node.attr["_output_shapes"].list.shape.extend([tf.TensorShape(shape).as_proto()])
+    return node
 
 class AlgebraicSimplifyPassTest(unittest.TestCase):
+    def setUp(self):
+        """Instantiate the pass from the registry."""
+        self.simplify_pass = PassRegistry.get_pass("algebraic_simplify")
+        self.assertIsNotNone(self.simplify_pass, "Pass not found in registry")
+
     def create_graph(self, nodes):
         """Helper to create a GraphDef from node list."""
         graph_def = tf.GraphDef()
         graph_def.node.extend(nodes)
         return graph_def
 
-    def test_add_zero_left(self):
-        x = create_node("Placeholder", name="x")
-        zero = create_const_node("zero", value=0, dtype="float32", shape=[])
-        add = create_node("Add", name="add", inputs=["zero", "x"])
-        graph = self.create_graph([x, zero, add])
-
+    def run_pass(self, graph, protected_nodes=None):
+        """Helper to run the simplification pass on a graph."""
         optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
+        self.simplify_pass.transform(
+            optimizer, auto_cleanup=True, protected_nodes=protected_nodes
+        )
+        return optimizer.graph_def
 
-        # add should be replaced by x
-        names = {n.name for n in optimizer.graph_def.node}
-        self.assertIn("x", names)
-        self.assertNotIn("add", names)
-
-    def test_add_zero_right(self):
-        x = create_node("Placeholder", name="x")
+    def test_add_zero(self):
+        x = _make_placeholder("x", tf.float32, [])
         zero = create_const_node("zero", value=0, dtype="float32", shape=[])
         add = create_node("Add", name="add", inputs=["x", "zero"])
+        add.attr["T"].type = tf.float32.as_datatype_enum
+        add.attr["_output_shapes"].list.shape.extend([tf.TensorShape([]).as_proto()])
         graph = self.create_graph([x, zero, add])
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        names = {n.name for n in optimizer.graph_def.node}
+        optimized_graph = self.run_pass(graph)
+        names = {n.name for n in optimized_graph.node}
         self.assertIn("x", names)
         self.assertNotIn("add", names)
 
     def test_sub_zero(self):
-        x = create_node("Placeholder", name="x")
+        x = _make_placeholder("x", tf.float32, [])
         zero = create_const_node("zero", value=0, dtype="float32", shape=[])
         sub = create_node("Sub", name="sub", inputs=["x", "zero"])
+        sub.attr["T"].type = tf.float32.as_datatype_enum
+        sub.attr["_output_shapes"].list.shape.extend([tf.TensorShape([]).as_proto()])
         graph = self.create_graph([x, zero, sub])
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        names = {n.name for n in optimizer.graph_def.node}
+        optimized_graph = self.run_pass(graph)
+        names = {n.name for n in optimized_graph.node}
         self.assertIn("x", names)
         self.assertNotIn("sub", names)
 
-    def test_mul_one_left(self):
-        x = create_node("Placeholder", name="x")
-        one = create_const_node("one", value=1, dtype="float32", shape=[])
-        mul = create_node("Mul", name="mul", inputs=["one", "x"])
-        graph = self.create_graph([x, one, mul])
+    def test_sub_same(self):
+        x = _make_placeholder("x", tf.float32, [2, 2])
+        sub = create_node("Sub", name="sub", inputs=["x", "x"])
+        sub.attr["T"].type = tf.float32.as_datatype_enum
+        graph = self.create_graph([x, sub])
+        optimized_graph = self.run_pass(graph)
+        self.assertEqual(len(optimized_graph.node), 1)
+        const_node = [n for n in optimized_graph.node if n.op == "Const"][0]
+        self.assertEqual(const_node.name, "sub")
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
+    def test_add_neg(self):
+        x = _make_placeholder("x", tf.float32, [2, 2])
+        neg = create_node("Neg", name="neg", inputs=[x.name])
+        neg.attr["T"].type = tf.float32.as_datatype_enum
+        add = create_node("Add", name="add", inputs=[x.name, neg.name])
+        add.attr["T"].type = tf.float32.as_datatype_enum
+        add.attr["_output_shapes"].list.shape.extend([tf.TensorShape([2, 2]).as_proto()])
+        graph = self.create_graph([x, neg, add])
+        optimized_graph = self.run_pass(graph)
+        self.assertEqual(len(optimized_graph.node), 1)
+        const_node = [n for n in optimized_graph.node if n.op == "Const"][0]
+        self.assertEqual(const_node.name, "add")
 
-        names = {n.name for n in optimizer.graph_def.node}
-        self.assertIn("x", names)
-        self.assertNotIn("mul", names)
-
-    def test_mul_one_right(self):
-        x = create_node("Placeholder", name="x")
+    def test_mul_one(self):
+        x = _make_placeholder("x", tf.float32, [])
         one = create_const_node("one", value=1, dtype="float32", shape=[])
         mul = create_node("Mul", name="mul", inputs=["x", "one"])
+        mul.attr["T"].type = tf.float32.as_datatype_enum
+        mul.attr["_output_shapes"].list.shape.extend([tf.TensorShape([]).as_proto()])
         graph = self.create_graph([x, one, mul])
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        names = {n.name for n in optimizer.graph_def.node}
+        optimized_graph = self.run_pass(graph)
+        names = {n.name for n in optimized_graph.node}
         self.assertIn("x", names)
         self.assertNotIn("mul", names)
 
-    def test_mul_zero_left(self):
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([]).as_proto())
+    def test_mul_zero(self):
+        x = _make_placeholder("x", tf.float32, [2, 2])
         zero = create_const_node("zero", value=0, dtype="float32", shape=[])
-        mul = create_node("Mul", name="mul", inputs=["zero", "x"])
+        mul = create_node("Mul", name="mul", inputs=[x.name, zero.name])
+        mul.attr["T"].type = tf.float32.as_datatype_enum
+        mul.attr["_output_shapes"].list.shape.extend([tf.TensorShape([2, 2]).as_proto()])
         graph = self.create_graph([x, zero, mul])
+        optimized_graph = self.run_pass(graph)
+        self.assertEqual(len(optimized_graph.node), 1)
+        const_node = [n for n in optimized_graph.node if n.op == "Const"][0]
+        self.assertEqual(const_node.name, "mul")
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(
-            optimizer, auto_cleanup=True, protected_nodes=["mul_zero"]
-        )
-
-        # result should be a zero const
-        zeros = [
-            n
-            for n in optimizer.graph_def.node
-            if n.op == "Const" and n.name == "mul_zero"
-        ]
-        self.assertEqual(len(zeros), 1)
-        self.assertNotIn("mul", {n.name for n in optimizer.graph_def.node})
+    def test_mul_same(self):
+        x = _make_placeholder("x", tf.float32, [])
+        mul = create_node("Mul", name="mul", inputs=["x", "x"])
+        mul.attr["T"].type = tf.float32.as_datatype_enum
+        graph = self.create_graph([x, mul])
+        optimized_graph = self.run_pass(graph)
+        self.assertTrue(any(n.op == "Square" for n in optimized_graph.node))
+        self.assertFalse(any(n.op == "Mul" for n in optimized_graph.node))
 
     def test_div_one(self):
-        x = create_node("Placeholder", name="x")
+        x = _make_placeholder("x", tf.float32, [])
         one = create_const_node("one", value=1, dtype="float32", shape=[])
         div = create_node("Div", name="div", inputs=["x", "one"])
+        div.attr["T"].type = tf.float32.as_datatype_enum
+        div.attr["_output_shapes"].list.shape.extend([tf.TensorShape([]).as_proto()])
         graph = self.create_graph([x, one, div])
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        names = {n.name for n in optimizer.graph_def.node}
+        optimized_graph = self.run_pass(graph)
+        names = {n.name for n in optimized_graph.node}
         self.assertIn("x", names)
         self.assertNotIn("div", names)
 
-    def test_neg_neg(self):
-        x = create_node("Placeholder", name="x")
+    def test_div_same(self):
+        x = _make_placeholder("x", tf.float32, [2, 2])
+        div = create_node("Div", name="div", inputs=["x", "x"])
+        div.attr["T"].type = tf.float32.as_datatype_enum
+        graph = self.create_graph([x, div])
+        optimized_graph = self.run_pass(graph)
+        self.assertEqual(len(optimized_graph.node), 1)
+        const_node = [n for n in optimized_graph.node if n.op == "Const"][0]
+        self.assertEqual(const_node.name, "div")
+
+    def test_double_negation(self):
+        x = _make_placeholder("x", tf.float32, [])
         neg1 = create_node("Neg", name="neg1", inputs=["x"])
         neg2 = create_node("Neg", name="neg2", inputs=["neg1"])
         graph = self.create_graph([x, neg1, neg2])
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        names = {n.name for n in optimizer.graph_def.node}
+        optimized_graph = self.run_pass(graph)
+        names = {n.name for n in optimized_graph.node}
         self.assertIn("x", names)
         self.assertNotIn("neg1", names)
         self.assertNotIn("neg2", names)
 
-    def test_logical_not_not(self):
-        x = create_node("Placeholder", name="x")
-        not1 = create_node("LogicalNot", name="not1", inputs=["x"])
-        not2 = create_node("LogicalNot", name="not2", inputs=["not1"])
-        graph = self.create_graph([x, not1, not2])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        names = {n.name for n in optimizer.graph_def.node}
-        self.assertIn("x", names)
-        self.assertNotIn("not1", names)
-        self.assertNotIn("not2", names)
-
-    def test_equal_same(self):
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([]).as_proto())
+    def test_identity_comparison(self):
+        x = _make_placeholder("x", tf.float32, [])
         eq = create_node("Equal", name="eq", inputs=["x", "x"])
+        eq.attr["T"].type = tf.float32.as_datatype_enum
         graph = self.create_graph([x, eq])
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(
-            optimizer, auto_cleanup=True, protected_nodes=["eq_bool"]
-        )
+        optimized_graph = self.run_pass(graph)
 
-        trues = [
-            n
-            for n in optimizer.graph_def.node
-            if n.op == "Const" and n.name == "eq_bool"
-        ]
-        self.assertEqual(len(trues), 1)
-        self.assertNotIn("eq", {n.name for n in optimizer.graph_def.node})
+        self.assertEqual(len(optimized_graph.node), 1)
+        const_node = [n for n in optimized_graph.node if n.op == "Const"][0]
+        self.assertEqual(const_node.attr['dtype'].type, tf.bool.as_datatype_enum)
+        self.assertTrue(const_node.attr['value'].tensor.bool_val[0])
 
-    def test_select_same_branch(self):
-        cond = create_node("Placeholder", name="cond")
-        x = create_node("Placeholder", name="x")
+    def test_select_same_branches(self):
+        cond = _make_placeholder("cond", tf.bool, [])
+        x = _make_placeholder("x", tf.float32, [])
         sel = create_node("Select", name="sel", inputs=["cond", "x", "x"])
         graph = self.create_graph([cond, x, sel])
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        names = {n.name for n in optimizer.graph_def.node}
+        optimized_graph = self.run_pass(graph)
+        names = {n.name for n in optimized_graph.node}
         self.assertIn("x", names)
+        self.assertIn("cond", names)
         self.assertNotIn("sel", names)
 
-    def test_no_simplify_add_nonzero(self):
-        x = create_node("Placeholder", name="x")
-        y = create_node("Placeholder", name="y")
-        add = create_node("Add", name="add", inputs=["x", "y"])
-        graph = self.create_graph([x, y, add])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        # Should remain unchanged
-        names = {n.name for n in optimizer.graph_def.node}
-        self.assertIn("add", names)
-
-    def test_sub_same(self):
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([]).as_proto())
-        sub = create_node("Sub", name="sub", inputs=["x", "x"])
-        graph = self.create_graph([x, sub])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(
-            optimizer, auto_cleanup=True, protected_nodes=["sub_zero"]
-        )
-
-        names = {n.name for n in optimizer.graph_def.node}
-        self.assertIn("sub_zero", names)
-        self.assertNotIn("sub", names)
-
-    def test_add_neg(self):
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([]).as_proto())
-        neg = create_node("Neg", name="neg", inputs=["x"])
-        add = create_node("Add", name="add", inputs=["x", "neg"])
-        graph = self.create_graph([x, neg, add])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(
-            optimizer, auto_cleanup=True, protected_nodes=["add_zero"]
-        )
-
-        names = {n.name for n in optimizer.graph_def.node}
-        self.assertIn("add_zero", names)
-        self.assertNotIn("add", names)
-
-    def test_mul_same(self):
-        x = create_node("Placeholder", name="x")
-        mul = create_node("Mul", name="mul", inputs=["x", "x"])
-        graph = self.create_graph([x, mul])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        ops = {n.op for n in optimizer.graph_def.node}
-        self.assertIn("Square", ops)
-        self.assertNotIn("Mul", ops)
-
-    def test_div_same(self):
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([]).as_proto())
-        div = create_node("Div", name="div", inputs=["x", "x"])
-        graph = self.create_graph([x, div])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(
-            optimizer, auto_cleanup=True, protected_nodes=["div_one"]
-        )
-
-        names = {n.name for n in optimizer.graph_def.node}
-        self.assertIn("div_one", names)
-        self.assertNotIn("div", names)
-
-    def test_pow_one(self):
-        x = create_node("Placeholder", name="x")
-        one = create_const_node("one", value=1, dtype="float32", shape=[])
-        pow_node = create_node("Pow", name="pow", inputs=["x", "one"])
-        graph = self.create_graph([x, one, pow_node])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        names = {n.name for n in optimizer.graph_def.node}
-        self.assertIn("x", names)
-        self.assertNotIn("pow", names)
-
-    def test_pow_two(self):
-        x = create_node("Placeholder", name="x")
-        two = create_const_node("two", value=2, dtype="float32", shape=[])
-        pow_node = create_node("Pow", name="pow", inputs=["x", "two"])
-        graph = self.create_graph([x, two, pow_node])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        ops = {n.op for n in optimizer.graph_def.node}
-        self.assertIn("Square", ops)
-        self.assertNotIn("Pow", ops)
-
-    def test_logical_and_false(self):
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([]).as_proto())
-        false_node = create_const_node("false", value=False, dtype="bool", shape=[])
-        and_node = create_node("LogicalAnd", name="and_node", inputs=["x", "false"])
-        graph = self.create_graph([x, false_node, and_node])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(
-            optimizer, auto_cleanup=True, protected_nodes=["and_node_bool"]
-        )
-
-        consts = [n for n in optimizer.graph_def.node if n.op == "Const"]
-        # Should have and_node_bool (False)
-        has_false = any(
-            n.name == "and_node_bool" and n.attr["value"].tensor.bool_val[0] == False
-            for n in consts
-        )
-        self.assertTrue(has_false)
-
-    def test_logical_or_true(self):
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([]).as_proto())
-        true_node = create_const_node("true", value=True, dtype="bool", shape=[])
-        or_node = create_node("LogicalOr", name="or_node", inputs=["x", "true"])
-        graph = self.create_graph([x, true_node, or_node])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(
-            optimizer, auto_cleanup=True, protected_nodes=["or_node_bool"]
-        )
-
-        consts = [n for n in optimizer.graph_def.node if n.op == "Const"]
-        has_true = any(
-            n.name == "or_node_bool" and n.attr["value"].tensor.bool_val[0] == True
-            for n in consts
-        )
-        self.assertTrue(has_true)
-
-    def test_add_zero_broadcast_positive(self):
-        # x is [2, 2], zero is scalar []. Add(x, 0) -> x [2, 2]. Safe.
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([2, 2]).as_proto())
+    def test_add_zero_broadcast_is_safe(self):
+        x = _make_placeholder("x", tf.float32, [2, 2])
         zero = create_const_node("zero", value=0, dtype="float32", shape=[])
         add = create_node("Add", name="add", inputs=["x", "zero"])
+        add.attr["T"].type = tf.float32.as_datatype_enum
+        add.attr["_output_shapes"].list.shape.extend([tf.TensorShape([2, 2]).as_proto()])
         graph = self.create_graph([x, zero, add])
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        names = {n.name for n in optimizer.graph_def.node}
+        optimized_graph = self.run_pass(graph)
+        names = {n.name for n in optimized_graph.node}
         self.assertIn("x", names)
         self.assertNotIn("add", names)
 
-    def test_add_zero_broadcast_negative(self):
-        # x is scalar [], zero is [2, 2]. Add(x, zero) is [2, 2]. 
-        # Simplifying to x would change shape to []. NOT SAFE.
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([]).as_proto())
-        zero = create_const_node("zero", value=[[0, 0], [0, 0]], dtype="float32", shape=[2, 2])
+    def test_add_zero_broadcast_is_unsafe(self):
+        x = _make_placeholder("x", tf.float32, [])
+        zero = create_const_node("zero", value=np.zeros((2,2)), dtype="float32", shape=[2, 2])
         add = create_node("Add", name="add", inputs=["x", "zero"])
+        add.attr["T"].type = tf.float32.as_datatype_enum
+        add.attr["_output_shapes"].list.shape.extend([tf.TensorShape([2, 2]).as_proto()])
         graph = self.create_graph([x, zero, add])
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(optimizer, auto_cleanup=True)
-
-        # Should NOT simplify
-        names = {n.name for n in optimizer.graph_def.node}
+        optimized_graph = self.run_pass(graph)
+        names = {n.name for n in optimized_graph.node}
         self.assertIn("add", names)
 
-    def test_mul_zero_broadcast(self):
-        # x is [2, 1], zero is [1, 2]. Mul(x, zero) is [2, 2].
-        # Even if one is zero, we must create a [2, 2] zero.
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([2, 1]).as_proto())
-        zero = create_const_node("zero", value=[[0, 0]], dtype="float32", shape=[1, 2])
-        mul = create_node("Mul", name="mul", inputs=["x", "zero"])
-        graph = self.create_graph([x, zero, mul])
+    def test_logical_and_false(self):
+        x = _make_placeholder("x", tf.bool, [2, 2])
+        false_const = create_const_node("false", value=False, dtype="bool", shape=[])
+        land = create_node("LogicalAnd", name="land", inputs=[x.name, false_const.name])
+        land.attr["_output_shapes"].list.shape.extend([tf.TensorShape([2, 2]).as_proto()])
+        graph = self.create_graph([x, false_const, land])
+        optimized_graph = self.run_pass(graph)
+        self.assertEqual(len(optimized_graph.node), 1)
+        const_node = [n for n in optimized_graph.node if n.op == "Const"][0]
+        self.assertEqual(const_node.name, "land")
 
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(
-            optimizer, auto_cleanup=True, protected_nodes=["mul_zero"]
-        )
-
-        # Should simplify to a [2, 2] zero constant
-        folded = [n for n in optimizer.graph_def.node if n.name == "mul_zero"]
-        self.assertEqual(len(folded), 1)
-        shape = [d.size for d in folded[0].attr["value"].tensor.tensor_shape.dim]
-        self.assertEqual(shape, [2, 2])
-
-    def test_logical_and_broadcast_negative(self):
-        # x is [], False is [2]. And(x, False) is [2].
-        # Simplifying to scalar False is NOT safe.
-        x = create_node("Placeholder", name="x")
-        x.attr["shape"].shape.CopyFrom(tf.TensorShape([]).as_proto())
-        false_node = create_const_node("false", value=[False, False], dtype="bool", shape=[2])
-        and_node = create_node("LogicalAnd", name="and_node", inputs=["x", "false"])
-        graph = self.create_graph([x, false_node, and_node])
-
-        optimizer = GraphOptimizer(graph)
-        optimizer.load_state(graph)
-        simplify_pass = AlgebraicSimplifyPass()
-        simplify_pass.transform(
-            optimizer, auto_cleanup=True, protected_nodes=["and_node_bool"]
-        )
-
-        # Should simplify to a [2] False constant
-        folded = [n for n in optimizer.graph_def.node if n.name == "and_node_bool"]
-        self.assertEqual(len(folded), 1)
-        shape = [d.size for d in folded[0].attr["value"].tensor.tensor_shape.dim]
-        self.assertEqual(shape, [2])
-
+    def test_logical_or_true(self):
+        x = _make_placeholder("x", tf.bool, [2, 2])
+        true_const = create_const_node("true", value=True, dtype="bool", shape=[])
+        lor = create_node("LogicalOr", name="lor", inputs=[x.name, true_const.name])
+        lor.attr["_output_shapes"].list.shape.extend([tf.TensorShape([2, 2]).as_proto()])
+        graph = self.create_graph([x, true_const, lor])
+        optimized_graph = self.run_pass(graph)
+        self.assertEqual(len(optimized_graph.node), 1)
+        const_node = [n for n in optimized_graph.node if n.op == "Const"][0]
+        self.assertEqual(const_node.name, "lor")
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,7 +27,6 @@ Pass 执行顺序建议：
 from .scalar import (
     CSEPass,
     ConstantFoldPass,
-    AlgebraicSimplifyPass,
 )
 
 # Combine transforms
