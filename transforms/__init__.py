@@ -27,7 +27,15 @@ Pass 执行顺序建议：
 from .scalar import (
     CSEPass,
     ConstantFoldPass,
-    AlgebraicSimplifyPass,
+    SimplifyAddPass,
+    SimplifySubPass,
+    SimplifyMulPass,
+    SimplifyDivPass,
+    SimplifyNegPass,
+    SimplifyLogicalNotPass,
+    SimplifyRedundantComparisonPass,
+    SimplifySelectPass,
+    BypassIdentityPass,
 )
 
 # Combine transforms
@@ -44,7 +52,15 @@ __all__ = [
     # Scalar
     'CSEPass',
     'ConstantFoldPass',
-    'AlgebraicSimplifyPass',
+    'SimplifyAddPass',
+    'SimplifySubPass',
+    'SimplifyMulPass',
+    'SimplifyDivPass',
+    'SimplifyNegPass',
+    'SimplifyLogicalNotPass',
+    'SimplifyRedundantComparisonPass',
+    'SimplifySelectPass',
+    'BypassIdentityPass',
     # Combine
     'ConcatCombinePass',
     # Vectorize

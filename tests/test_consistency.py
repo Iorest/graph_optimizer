@@ -16,7 +16,13 @@ from graph_optimizer.runner import OptimizationPipeline
 from graph_optimizer.core import GraphOptimizer, OptimizationContext
 from graph_optimizer.utils import create_node, make_output_shapes_attr, create_const_node
 from graph_optimizer.transforms.vectorize import PackVectorizePass
-from graph_optimizer.transforms.scalar import AlgebraicSimplifyPass, ConstantFoldPass
+from graph_optimizer.transforms.scalar import (
+    ConstantFoldPass,
+    SimplifyAddPass,
+    SimplifySubPass,
+    SimplifyMulPass,
+    SimplifyDivPass,
+)
 from tensorflow.core.framework import attr_value_pb2
 from graph_optimizer.utils.logger import set_log_level
 import logging
