@@ -453,3 +453,80 @@ def build_consumer_index(graph_def: tf.GraphDef) -> Dict[str, list]:
             base_name = extract_base_name(input_name)
             consumers[base_name].append(node.name)
     return consumers
+
+
+def get_node_shape(optimizer, node_or_name):
+    """Returns the output shape of a node, if available."""
+    node = (
+        optimizer.nodes.get(node_or_name)
+        if isinstance(node_or_name, str)
+        else node_or_name
+    )
+    if node is None:
+        return None
+
+    if "_output_shapes" in node.attr:
+        shapes = node.attr["_output_shapes"].list.shape
+        if shapes:
+            return [d.size for d in shapes[0].dim]
+
+    if "shape" in node.attr:
+        return [d.size for d in node.attr["shape"].shape.dim]
+
+    if node.op == "Const" and "value" in node.attr:
+        tensor = node.attr["value"].tensor
+        if tensor.HasField("tensor_shape"):
+            return [d.size for d in tensor.tensor_shape.dim]
+
+    return None
+
+
+def is_const_with_value(optimizer, node_or_name, value):
+    """Checks if a node is a Const with a specific value."""
+    node = (
+        optimizer.nodes.get(node_or_name)
+        if isinstance(node_or_name, str)
+        else node_or_name
+    )
+    if node is None or node.op != "Const":
+        return False
+
+    try:
+        val = tensor_util.MakeNdarray(node.attr["value"].tensor)
+        return np.all(np.equal(val, value))
+    except Exception:
+        return False
+
+
+def get_broadcast_shape(s1, s2):
+    """Computes the broadcast shape of two shapes."""
+    if s1 is None or s2 is None:
+        return None
+    if s1 == s2:
+        return s1
+
+    if not s1: return s2
+    if not s2: return s1
+
+    len1, len2 = len(s1), len(s2)
+    max_len = max(len1, len2)
+    result = []
+    for i in range(max_len):
+        d1 = s1[len1 - 1 - i] if i < len1 else 1
+        d2 = s2[len2 - 1 - i] if i < len2 else 1
+        if d1 == d2 or d1 == -1 or d2 == -1:
+            result.append(d1 if d1 != 1 else d2)
+        elif d1 == 1:
+            result.append(d2)
+        elif d2 == 1:
+            result.append(d1)
+        else:
+            return None
+    return result[::-1]
+
+
+def is_shape_preserving(source_shape, target_shape):
+    """Checks if a simplification is shape-preserving."""
+    if source_shape is None or target_shape is None:
+        return True
+    return source_shape == target_shape
