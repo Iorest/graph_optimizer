@@ -1,6 +1,7 @@
 import tensorflow.compat.v1 as tf
 import collections
 import time
+import itertools
 from typing import Dict, List, Set, Optional, Any as AnyType, Tuple, Union
 from .utils.logger import (
     logger as logging,
@@ -582,7 +583,9 @@ class PatternMatcher:
             if node.name in replaced_node_names:
                 continue
 
-            candidates = self.pattern_index.get(node.op, []) + self.wildcard_patterns
+            candidates = itertools.chain(
+                self.pattern_index.get(node.op, []), self.wildcard_patterns
+            )
 
             found_match = False
             for pattern, rewriter in candidates:
