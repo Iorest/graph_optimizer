@@ -115,8 +115,10 @@ Relationships:
 """
 
 from collections import defaultdict
+
+from ...core import BasePass, PassRegistry
+from ...utils.hash_utils import hash_tensor_value
 from ...utils.logger import logger as logging
-from ...core import PassRegistry, BasePass
 
 
 def extract_key_attrs(attrs, op_type=None):
@@ -165,9 +167,9 @@ def extract_key_attrs(attrs, op_type=None):
             key_attrs.append((attr_name, "shape", shape_dims))
         elif attr_value.HasField("tensor"):
             # tensor 类型（Const 节点的 value 属性）
-            # 序列化为字节串确保相同值的常量有相同签名
-            tensor_bytes = attr_value.tensor.SerializeToString()
-            key_attrs.append((attr_name, "tensor", tensor_bytes))
+            # 使用哈希值代替完整的序列化字节串，以优化性能
+            tensor_hash = hash_tensor_value(attr_value.tensor)
+            key_attrs.append((attr_name, "tensor", tensor_hash))
         elif attr_value.HasField("func"):
             # 函数引用（如 While 循环的 body/cond）
             key_attrs.append((attr_name, "func", attr_value.func.name))
@@ -196,7 +198,7 @@ def extract_key_attrs(attrs, op_type=None):
             key_attrs.append((attr_name, "list_shape", shapes))
         elif attr_value.list.tensor:
             # list of tensor
-            tensors = tuple(t.SerializeToString() for t in attr_value.list.tensor)
+            tensors = tuple(hash_tensor_value(t) for t in attr_value.list.tensor)
             key_attrs.append((attr_name, "list_tensor", tensors))
         elif attr_value.list.func:
             # list of func
