@@ -321,6 +321,11 @@ class GraphOptimizer:
         if "shape" in node.attr:
             return [dim.size for dim in node.attr["shape"].shape.dim]
 
+        if node.op == "Const" and "value" in node.attr:
+            tensor = node.attr["value"].tensor
+            if tensor.HasField("tensor_shape"):
+                return [d.size for d in tensor.tensor_shape.dim]
+
         return None
 
     def get_node_rank(self, node_or_name):
@@ -1136,9 +1141,11 @@ def CommutativeOp(
 
 def ConstValue(value, alias=None):
     """Matches a Const node with a specific value."""
+    import numpy as np
 
     def check_value(unwrapped_value):
-        return unwrapped_value == value
+        # Use np.all() for element-wise comparison on arrays
+        return np.all(np.equal(unwrapped_value, value))
 
     return Op("Const", attrs={"value": check_value}, alias=alias)
 
