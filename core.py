@@ -321,6 +321,12 @@ class GraphOptimizer:
         if "shape" in node.attr:
             return [dim.size for dim in node.attr["shape"].shape.dim]
 
+        # Handle Const nodes by reading shape from the value attribute's tensor
+        if node.op == "Const" and "value" in node.attr:
+            tensor = node.attr["value"].tensor
+            if tensor.HasField("tensor_shape"):
+                return [dim.size for dim in tensor.tensor_shape.dim]
+
         return None
 
     def get_node_rank(self, node_or_name):
@@ -1516,11 +1522,34 @@ class PatternRewritePass(BasePass):
     for the actual pattern matching. Iterates until convergence (no more matches).
     """
 
-    def __init__(self, pattern, rewriter, name=None, optimizer_alias=None):
+    def __init__(self, patterns=None, rewriter=None, name=None, optimizer_alias=None, **kwargs):
+        """
+        Initialize a pattern rewrite pass.
+
+        Args:
+            patterns: A single Pattern or a list of Patterns to match. (Also accepts 'pattern' for compat)
+            rewriter: The rewriter function to execute on matches.
+            name: Human-readable pass name.
+            optimizer_alias: Short alias for node naming.
+        """
+        # Support legacy 'pattern' keyword argument
+        if patterns is None:
+            patterns = kwargs.pop("pattern", None)
+
+        if patterns is None:
+            raise ValueError("At least one pattern must be provided to PatternRewritePass")
+
         # Use iterative mode - run until convergence
         super().__init__(name, optimizer_alias, iterative=True, max_iterations=100)
-        self.pattern = pattern
+        if not isinstance(patterns, list):
+            patterns = [patterns]
+        self.patterns = patterns
         self.rewriter = trace_transformation(rewriter)
+
+    @property
+    def pattern(self):
+        """Property for backward compatibility (returns the first pattern)."""
+        return self.patterns[0] if self.patterns else None
 
     def transform_once(
         self,
@@ -1534,9 +1563,10 @@ class PatternRewritePass(BasePass):
         Returns:
             int: Number of changes made
         """
-        # Register the pattern (clear first to avoid duplicates)
+        # Register all patterns (clear first to avoid duplicates)
         optimizer.clear_transformations()
-        optimizer.add_transformation(self.pattern, self.rewriter)
+        for pattern in self.patterns:
+            optimizer.add_transformation(pattern, self.rewriter)
 
         # Run one pattern matching iteration
         new_graph_def, changes = optimizer.match_patterns_once(
