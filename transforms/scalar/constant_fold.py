@@ -58,9 +58,18 @@ class ConstantFoldPass(PatternRewritePass):
     """
 
     def __init__(self):
-        # Matches any operation with all inputs as Const
-        pattern = Any(alias="op")
-        super().__init__(pattern, self._rewrite_constant_op, name="ConstantFold")
+        # Specific operations supported for constant folding
+        foldable_ops = [
+            "Add", "Mul", "Sub", "Div", "Neg", "Equal", "NotEqual", "Less", "Greater",
+            "LessEqual", "GreaterEqual", "LogicalAnd", "LogicalOr", "LogicalNot",
+            "BitwiseAnd", "BitwiseOr", "BitwiseXor", "Abs", "Exp", "Expm1", "Log",
+            "Log1p", "Sqrt", "Pow", "Rsqrt", "Square", "Sin", "Cos", "Tan", "Asin",
+            "Acos", "Atan", "Atan2", "Floor", "Ceil", "Round", "Sign",
+            "Reshape", "Transpose", "ConcatV2", "Select", "Cast"
+        ]
+        # Register specific Op patterns instead of a catch-all Any() for O(1) matching
+        patterns = [Op(op, alias="op") for op in foldable_ops]
+        super().__init__(patterns, self._rewrite_constant_op, name="ConstantFold")
 
     def _is_all_const(self, inputs, optimizer):
         """Check if all inputs are Const nodes.

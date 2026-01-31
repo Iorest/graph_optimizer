@@ -87,9 +87,15 @@ class AlgebraicSimplifyPass(PatternRewritePass):
     """
 
     def __init__(self):
-        # We'll handle multiple patterns manually in _rewrite
-        pattern = Any(alias="op")  # fallback, we check inside
-        super().__init__(pattern, self._rewrite, name="AlgebraicSimplify")
+        # Specific operations supported by this pass
+        supported_ops = [
+            "Add", "Sub", "Mul", "Div", "Neg", "LogicalNot", "Abs", "Square", "Sqrt", "Pow",
+            "Equal", "NotEqual", "Less", "Greater", "LessEqual", "GreaterEqual",
+            "LogicalAnd", "LogicalOr", "Select", "Identity"
+        ]
+        # Register specific Op patterns instead of a catch-all Any() for O(1) matching
+        patterns = [Op(op, alias="op") for op in supported_ops]
+        super().__init__(patterns, self._rewrite, name="AlgebraicSimplify")
 
     def _rewrite(self, match, optimizer):
         node = match.matched_nodes["op"]
@@ -127,20 +133,9 @@ class AlgebraicSimplifyPass(PatternRewritePass):
             # Check if all elements are equal to the target value
             return np.all(np.equal(val, value))
 
-        # Helper to get shape of a node
+        # Use improved core.py utility for shape discovery
         def _get_shape(node_name):
-            node = _get_node(node_name)
-            if node is None:
-                return None
-            # Check for shape attribute (Placeholder, etc.)
-            if "shape" in node.attr:
-                return [d.size for d in node.attr["shape"].shape.dim]
-            # Check for Const value shape
-            if node.op == "Const" and "value" in node.attr:
-                tensor = node.attr["value"].tensor
-                if tensor.HasField("tensor_shape"):
-                    return [d.size for d in tensor.tensor_shape.dim]
-            return None
+            return optimizer.get_node_shape(node_name)
 
         # Helper to check if a node is definitely scalar
         def _is_scalar(node_name):
