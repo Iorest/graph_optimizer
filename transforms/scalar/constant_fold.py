@@ -58,9 +58,55 @@ class ConstantFoldPass(PatternRewritePass):
     """
 
     def __init__(self):
-        # Matches any operation with all inputs as Const
-        pattern = Any(alias="op")
-        super().__init__(pattern, self._rewrite_constant_op, name="ConstantFold")
+        # Use specific Op patterns for O(1) indexed matching instead of Any()
+        ops = [
+            "Add",
+            "Mul",
+            "Sub",
+            "Div",
+            "Neg",
+            "Equal",
+            "NotEqual",
+            "Less",
+            "Greater",
+            "LessEqual",
+            "GreaterEqual",
+            "LogicalAnd",
+            "LogicalOr",
+            "LogicalNot",
+            "BitwiseAnd",
+            "BitwiseOr",
+            "BitwiseXor",
+            "Abs",
+            "Exp",
+            "Expm1",
+            "Log",
+            "Log1p",
+            "Sqrt",
+            "Pow",
+            "Rsqrt",
+            "Square",
+            "Sin",
+            "Cos",
+            "Tan",
+            "Asin",
+            "Acos",
+            "Atan",
+            "Atan2",
+            "Floor",
+            "Ceil",
+            "Round",
+            "Sign",
+            "Reshape",
+            "Transpose",
+            "ConcatV2",
+            "Select",
+            "Cast",
+        ]
+        patterns = [Op(op, alias="op") for op in ops]
+        super().__init__(
+            patterns=patterns, rewriter=self._rewrite_constant_op, name="ConstantFold"
+        )
 
     def _is_all_const(self, inputs, optimizer):
         """Check if all inputs are Const nodes.

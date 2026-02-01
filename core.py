@@ -1516,11 +1516,29 @@ class PatternRewritePass(BasePass):
     for the actual pattern matching. Iterates until convergence (no more matches).
     """
 
-    def __init__(self, pattern, rewriter, name=None, optimizer_alias=None):
+    def __init__(
+        self,
+        pattern=None,
+        rewriter=None,
+        name=None,
+        optimizer_alias=None,
+        patterns=None,
+    ):
         # Use iterative mode - run until convergence
         super().__init__(name, optimizer_alias, iterative=True, max_iterations=100)
-        self.pattern = pattern
-        self.rewriter = trace_transformation(rewriter)
+
+        # Support both 'pattern' (single) and 'patterns' (list of Pattern or (Pattern, Rewriter))
+        self.patterns = []
+        if pattern:
+            self.patterns.append((pattern, trace_transformation(rewriter)))
+
+        if patterns:
+            for item in patterns:
+                if isinstance(item, tuple):
+                    self.patterns.append((item[0], trace_transformation(item[1])))
+                else:
+                    # Use common rewriter if only pattern is provided
+                    self.patterns.append((item, trace_transformation(rewriter)))
 
     def transform_once(
         self,
@@ -1534,9 +1552,10 @@ class PatternRewritePass(BasePass):
         Returns:
             int: Number of changes made
         """
-        # Register the pattern (clear first to avoid duplicates)
+        # Register the patterns (clear first to avoid duplicates)
         optimizer.clear_transformations()
-        optimizer.add_transformation(self.pattern, self.rewriter)
+        for pattern, rewriter in self.patterns:
+            optimizer.add_transformation(pattern, rewriter)
 
         # Run one pattern matching iteration
         new_graph_def, changes = optimizer.match_patterns_once(
