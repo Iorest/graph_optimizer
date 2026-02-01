@@ -87,9 +87,33 @@ class AlgebraicSimplifyPass(PatternRewritePass):
     """
 
     def __init__(self):
-        # We'll handle multiple patterns manually in _rewrite
-        pattern = Any(alias="op")  # fallback, we check inside
-        super().__init__(pattern, self._rewrite, name="AlgebraicSimplify")
+        # Use specific Op patterns for O(1) indexed matching instead of Any()
+        ops = [
+            "Add",
+            "Sub",
+            "Mul",
+            "Div",
+            "Neg",
+            "LogicalNot",
+            "Abs",
+            "Square",
+            "Sqrt",
+            "Pow",
+            "Equal",
+            "NotEqual",
+            "Less",
+            "Greater",
+            "LessEqual",
+            "GreaterEqual",
+            "LogicalAnd",
+            "LogicalOr",
+            "Select",
+            "Identity",
+        ]
+        patterns = [Op(op, alias="op") for op in ops]
+        super().__init__(
+            patterns=patterns, rewriter=self._rewrite, name="AlgebraicSimplify"
+        )
 
     def _rewrite(self, match, optimizer):
         node = match.matched_nodes["op"]
