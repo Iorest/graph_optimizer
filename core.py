@@ -1516,11 +1516,32 @@ class PatternRewritePass(BasePass):
     for the actual pattern matching. Iterates until convergence (no more matches).
     """
 
-    def __init__(self, pattern, rewriter, name=None, optimizer_alias=None):
+    def __init__(self, pattern=None, rewriter=None, name=None, optimizer_alias=None, patterns=None):
         # Use iterative mode - run until convergence
         super().__init__(name, optimizer_alias, iterative=True, max_iterations=100)
-        self.pattern = pattern
-        self.rewriter = trace_transformation(rewriter)
+
+        # Support both single pattern/rewriter and multiple patterns
+        if patterns:
+            # list of (pattern, rewriter) or Pattern objects
+            self.patterns = []
+            for item in patterns:
+                if isinstance(item, tuple):
+                    p, r = item
+                    self.patterns.append((p, trace_transformation(r)))
+                else:
+                    # Backward compatibility for direct pattern registration if rewriter is provided
+                    if rewriter:
+                        self.patterns.append((item, trace_transformation(rewriter)))
+                    else:
+                        raise ValueError(f"Pattern {item} must be paired with a rewriter")
+        elif pattern and rewriter:
+            self.patterns = [(pattern, trace_transformation(rewriter))]
+        else:
+            raise ValueError("Must provide either 'pattern' and 'rewriter', or 'patterns'")
+
+        # For backward compatibility with tests/subclasses accessing .pattern or .rewriter
+        self.pattern = self.patterns[0][0]
+        self.rewriter = self.patterns[0][1]
 
     def transform_once(
         self,
@@ -1534,9 +1555,10 @@ class PatternRewritePass(BasePass):
         Returns:
             int: Number of changes made
         """
-        # Register the pattern (clear first to avoid duplicates)
+        # Register all patterns (clear first to avoid duplicates)
         optimizer.clear_transformations()
-        optimizer.add_transformation(self.pattern, self.rewriter)
+        for p, r in self.patterns:
+            optimizer.add_transformation(p, r)
 
         # Run one pattern matching iteration
         new_graph_def, changes = optimizer.match_patterns_once(

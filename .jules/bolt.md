@@ -1,0 +1,3 @@
+## 2026-02-02 - [Optimizing Pattern Matching Lookup]
+**Learning:** Using a general `Any()` wildcard pattern in a rewrite pass that only targets specific operations is a performance anti-pattern. The `PatternMatcher` has an O(1) fast path via `pattern_index` for specific op types, but falls back to O(N) evaluation for wildcards, checking them against every node in the graph.
+**Action:** Always prefer registering multiple specific `Op` patterns over a single `Any()` pattern in `PatternRewritePass`. This ensures the `GraphOptimizer` can utilize its indexed lookup, significantly reducing optimization time (e.g., ~4.5x speedup in this task).
