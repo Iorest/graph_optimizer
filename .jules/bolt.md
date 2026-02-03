@@ -1,0 +1,3 @@
+## 2026-02-03 - [Optimizing Pattern Matching with Indexed Lookups]
+**Learning:** Using a general `Any()` wildcard pattern at the root of a `PatternRewritePass` is a performance anti-pattern. It forces the `PatternMatcher` to evaluate the rewriter logic for every single node in the graph, resulting in O(N) complexity per iteration. By explicitly registering specific `Op` patterns, the matcher can leverage its O(1) `pattern_index` lookup, skipping nodes that don't match the required operation types.
+**Action:** Always prefer registering a list of specific `Op` patterns over a single `Any()` wildcard for passes that target a known set of operations. Update `PatternRewritePass` to support multiple patterns to facilitate this.

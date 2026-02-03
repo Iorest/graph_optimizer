@@ -1516,11 +1516,46 @@ class PatternRewritePass(BasePass):
     for the actual pattern matching. Iterates until convergence (no more matches).
     """
 
-    def __init__(self, pattern, rewriter, name=None, optimizer_alias=None):
-        # Use iterative mode - run until convergence
+    def __init__(
+        self, pattern=None, rewriter=None, name=None, optimizer_alias=None, patterns=None
+    ):
+        """
+        Initialize a pattern rewrite pass.
+
+        Args:
+            pattern: Single Pattern object (optional if patterns is used)
+            rewriter: Rewriter function for the single pattern
+            name: Human-readable pass name
+            optimizer_alias: Short alias for node naming
+            patterns: List of Pattern objects or (Pattern, Rewriter) tuples.
+                     If Pattern objects are provided, the 'rewriter' argument
+                     will be used as the rewriter for all of them.
+        """
         super().__init__(name, optimizer_alias, iterative=True, max_iterations=100)
-        self.pattern = pattern
-        self.rewriter = trace_transformation(rewriter)
+
+        self._patterns = []
+        default_rewriter = trace_transformation(rewriter) if rewriter else None
+
+        if patterns is not None:
+            for item in patterns:
+                if isinstance(item, tuple):
+                    p, r = item
+                    self._patterns.append((p, trace_transformation(r)))
+                else:
+                    if default_rewriter is None:
+                        raise ValueError(
+                            "Rewriter must be provided if patterns contains Pattern objects"
+                        )
+                    self._patterns.append((item, default_rewriter))
+        elif pattern is not None and rewriter is not None:
+            self._patterns.append((pattern, default_rewriter))
+        else:
+            raise ValueError(
+                "Either (pattern and rewriter) or patterns must be provided"
+            )
+
+        # For backward compatibility and convenience
+        self.pattern, self.rewriter = self._patterns[0]
 
     def transform_once(
         self,
@@ -1534,9 +1569,10 @@ class PatternRewritePass(BasePass):
         Returns:
             int: Number of changes made
         """
-        # Register the pattern (clear first to avoid duplicates)
+        # Register all patterns (clear first to avoid duplicates)
         optimizer.clear_transformations()
-        optimizer.add_transformation(self.pattern, self.rewriter)
+        for p, r in self._patterns:
+            optimizer.add_transformation(p, r)
 
         # Run one pattern matching iteration
         new_graph_def, changes = optimizer.match_patterns_once(
