@@ -1514,13 +1514,58 @@ class PatternRewritePass(BasePass):
 
     Uses BasePass's iterative framework with GraphOptimizer.match_patterns_once()
     for the actual pattern matching. Iterates until convergence (no more matches).
+
+    Supports multiple patterns, each optionally with its own rewriter.
     """
 
-    def __init__(self, pattern, rewriter, name=None, optimizer_alias=None):
+    def __init__(
+        self,
+        pattern: Optional[Pattern] = None,
+        rewriter: Optional[AnyType] = None,
+        name: Optional[str] = None,
+        optimizer_alias: Optional[str] = None,
+        patterns: Optional[List[Union[Pattern, Tuple[Pattern, AnyType]]]] = None,
+    ):
+        """
+        Initialize PatternRewritePass.
+
+        Args:
+            pattern: Single pattern to match (backward compatibility)
+            rewriter: Rewriter function for the single pattern
+            name: Pass name
+            optimizer_alias: Alias for node naming
+            patterns: List of Pattern objects or (Pattern, Rewriter) tuples.
+                     If a list of Pattern objects is provided, 'rewriter' must be provided.
+        """
         # Use iterative mode - run until convergence
         super().__init__(name, optimizer_alias, iterative=True, max_iterations=100)
-        self.pattern = pattern
-        self.rewriter = trace_transformation(rewriter)
+
+        self.rules: List[Tuple[Pattern, AnyType]] = []
+
+        if patterns:
+            # Wrap the common rewriter once if provided to avoid redundant logging
+            wrapped_common_rewriter = (
+                trace_transformation(rewriter) if rewriter else None
+            )
+
+            # Handle multiple patterns
+            for item in patterns:
+                if isinstance(item, tuple):
+                    p, r = item
+                    self.rules.append((p, trace_transformation(r)))
+                else:
+                    if wrapped_common_rewriter is None:
+                        raise ValueError(
+                            "rewriter must be provided if 'patterns' contains Pattern objects"
+                        )
+                    self.rules.append((item, wrapped_common_rewriter))
+        elif pattern and rewriter:
+            # Handle single pattern (backward compatibility)
+            self.rules.append((pattern, trace_transformation(rewriter)))
+        else:
+            raise ValueError(
+                "Must provide either 'patterns' or both 'pattern' and 'rewriter'"
+            )
 
     def transform_once(
         self,
@@ -1534,9 +1579,10 @@ class PatternRewritePass(BasePass):
         Returns:
             int: Number of changes made
         """
-        # Register the pattern (clear first to avoid duplicates)
+        # Register all patterns (clear first to avoid duplicates)
         optimizer.clear_transformations()
-        optimizer.add_transformation(self.pattern, self.rewriter)
+        for pattern, rewriter in self.rules:
+            optimizer.add_transformation(pattern, rewriter)
 
         # Run one pattern matching iteration
         new_graph_def, changes = optimizer.match_patterns_once(
