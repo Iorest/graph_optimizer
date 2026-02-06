@@ -1,6 +1,7 @@
 import tensorflow.compat.v1 as tf
 import collections
 import time
+import itertools
 from typing import Dict, List, Set, Optional, Any as AnyType, Tuple, Union
 from .utils.logger import (
     logger as logging,
@@ -582,7 +583,7 @@ class PatternMatcher:
             if node.name in replaced_node_names:
                 continue
 
-            candidates = self.pattern_index.get(node.op, []) + self.wildcard_patterns
+            candidates = itertools.chain(self.pattern_index.get(node.op, []), self.wildcard_patterns)
 
             found_match = False
             for pattern, rewriter in candidates:
@@ -1516,11 +1517,46 @@ class PatternRewritePass(BasePass):
     for the actual pattern matching. Iterates until convergence (no more matches).
     """
 
-    def __init__(self, pattern, rewriter, name=None, optimizer_alias=None):
-        # Use iterative mode - run until convergence
+    def __init__(
+        self,
+        patterns: Union[Pattern, List[Union[Pattern, Tuple[Pattern, AnyType]]]] = None,
+        rewriter: AnyType = None,
+        name=None,
+        optimizer_alias=None,
+        pattern: Pattern = None,  # Backward compatibility for keyword argument
+    ):
+        """
+        Initialize a pattern-rewrite pass.
+
+        Args:
+            patterns: List of (Pattern, Rewriter) tuples, or a single Pattern (for backward compatibility).
+            rewriter: Single Rewriter (only used if patterns is a single Pattern).
+            name: Pass name.
+            optimizer_alias: Optimizer alias.
+            pattern: Single Pattern (backward compatibility for keyword argument).
+        """
         super().__init__(name, optimizer_alias, iterative=True, max_iterations=100)
-        self.pattern = pattern
-        self.rewriter = trace_transformation(rewriter)
+
+        # Handle backward compatibility for 'pattern' keyword argument
+        if pattern is not None:
+            patterns = pattern
+
+        self.patterns = []
+        # Support both new 'patterns' list and old 'pattern, rewriter' arguments
+        if isinstance(patterns, list):
+            # Cache wrapped rewriters to avoid redundant wrappers for multiple patterns
+            rewriter_to_wrapped = {}
+            for p in patterns:
+                if isinstance(p, tuple):
+                    pat, rew = p
+                    if rew not in rewriter_to_wrapped:
+                        rewriter_to_wrapped[rew] = trace_transformation(rew)
+                    self.patterns.append((pat, rewriter_to_wrapped[rew]))
+                else:
+                    self.patterns.append(p)
+        elif patterns is not None and rewriter is not None:
+            # Single pattern and rewriter case
+            self.patterns = [(patterns, trace_transformation(rewriter))]
 
     def transform_once(
         self,
@@ -1534,9 +1570,10 @@ class PatternRewritePass(BasePass):
         Returns:
             int: Number of changes made
         """
-        # Register the pattern (clear first to avoid duplicates)
+        # Register all patterns (clear first to avoid duplicates)
         optimizer.clear_transformations()
-        optimizer.add_transformation(self.pattern, self.rewriter)
+        for p, r in self.patterns:
+            optimizer.add_transformation(p, r)
 
         # Run one pattern matching iteration
         new_graph_def, changes = optimizer.match_patterns_once(

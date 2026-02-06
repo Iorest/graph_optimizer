@@ -87,9 +87,102 @@ class AlgebraicSimplifyPass(PatternRewritePass):
     """
 
     def __init__(self):
-        # We'll handle multiple patterns manually in _rewrite
-        pattern = Any(alias="op")  # fallback, we check inside
-        super().__init__(pattern, self._rewrite, name="AlgebraicSimplify")
+        # Register specific Op patterns to leverage indexed matching
+        supported_ops = [
+            "Add", "Sub", "Mul", "Div", "Neg", "LogicalNot", "Abs", "Square",
+            "Sqrt", "Pow", "Equal", "NotEqual", "Less", "Greater",
+            "LessEqual", "GreaterEqual", "LogicalAnd", "LogicalOr", "Select", "Identity"
+        ]
+        patterns = [(Op(op, alias="op"), self._rewrite) for op in supported_ops]
+        super().__init__(patterns=patterns, name="AlgebraicSimplify")
+
+    def _mapped_result(self, name, target_name):
+        """Returns a RewriteResult that redirects a node to another."""
+        return RewriteResult(new_nodes=[], node_mapping={name: target_name})
+
+    def _new_node_result(self, name, new_node):
+        """Returns a RewriteResult that replaces a node with a new one."""
+        return RewriteResult(new_nodes=[new_node], node_mapping={name: new_node.name})
+
+    def _bool_const(self, name, val, inputs, optimizer):
+        """Helper for comparison results. Result has same shape as first input."""
+        s = self._get_shape(inputs[0], optimizer)
+        if s is None:
+            return None
+        return self._new_node_result(
+            name, create_const_node(name + "_bool", value=val, dtype="bool", shape=s)
+        )
+
+    def _get_node(self, name, optimizer):
+        """Helper to get node object ignoring output index."""
+        real_name = name.split(":")[0]
+        return optimizer.nodes.get(real_name)
+
+    def _is_const(self, node_name, value, optimizer):
+        """Helper to check if a node is Const with given value (broadcast-safe)."""
+        node = self._get_node(node_name, optimizer)
+        if node is None or node.op != "Const":
+            return False
+        val = optimizer.get_node_attr(node, "value")
+        # Check if all elements are equal to the target value
+        return np.all(np.equal(val, value))
+
+    def _get_shape(self, node_name, optimizer):
+        """Helper to get shape of a node."""
+        node = self._get_node(node_name, optimizer)
+        if node is None:
+            return None
+        # Check for shape attribute (Placeholder, etc.)
+        if "shape" in node.attr:
+            return [d.size for d in node.attr["shape"].shape.dim]
+        # Check for Const value shape
+        if node.op == "Const" and "value" in node.attr:
+            tensor = node.attr["value"].tensor
+            if tensor.HasField("tensor_shape"):
+                return [d.size for d in tensor.tensor_shape.dim]
+        return None
+
+    def _is_scalar(self, node_name, optimizer):
+        """Helper to check if a node is definitely scalar."""
+        shape = self._get_shape(node_name, optimizer)
+        return shape == []
+
+    def _get_broadcast_shape(self, s1, s2):
+        """Helper to compute broadcast shape of two shapes."""
+        if s1 is None or s2 is None:
+            return None
+        if s1 == s2:
+            return s1
+        if not s1:
+            return s2
+        if not s2:
+            return s1
+
+        # Simple broadcasting logic
+        len1, len2 = len(s1), len(s2)
+        max_len = max(len1, len2)
+        result = []
+        for i in range(max_len):
+            d1 = s1[len1 - 1 - i] if i < len1 else 1
+            d2 = s2[len2 - 1 - i] if i < len2 else 1
+            if d1 == d2:
+                result.append(d1)
+            elif d1 == 1:
+                result.append(d2)
+            elif d2 == 1:
+                result.append(d1)
+            else:
+                return None # Incompatible
+        return result[::-1]
+
+    def _is_shape_preserving(self, source_shape, target_shape):
+        """Helper to check if simplification is shape-preserving."""
+        # If both are unknown, assume it's safe (common in simple tests)
+        if source_shape is None and target_shape is None:
+            return True
+        if source_shape is None or target_shape is None:
+            return False
+        return source_shape == target_shape
 
     def _rewrite(self, match, optimizer):
         node = match.matched_nodes["op"]
@@ -97,303 +190,200 @@ class AlgebraicSimplifyPass(PatternRewritePass):
         inputs = list(node.input)
         name = node.name
 
-        def _mapped_result(target_name):
-            return RewriteResult(new_nodes=[], node_mapping={name: target_name})
-
-        def _new_node_result(new_node):
-            return RewriteResult(
-                new_nodes=[new_node], node_mapping={name: new_node.name}
-            )
-
-        # Helper to create True/False const
-        def _bool_const(val):
-            return _new_node_result(
-                create_const_node(name + "_bool", value=val, dtype="bool", shape=[])
-            )
-
-        # Helper to get node object ignoring output index
-        def _get_node(name):
-            real_name = name.split(":")[0]
-            return optimizer.nodes.get(real_name)
-
-        # Helper to check if a node is Const with given value (broadcast-safe)
-        def _is_const(node_name, value):
-            node = _get_node(node_name)
-            if node is None:
-                return False
-            if node.op != "Const":
-                return False
-            val = optimizer.get_node_attr(node, "value")
-            # Check if all elements are equal to the target value
-            return np.all(np.equal(val, value))
-
-        # Helper to get shape of a node
-        def _get_shape(node_name):
-            node = _get_node(node_name)
-            if node is None:
-                return None
-            # Check for shape attribute (Placeholder, etc.)
-            if "shape" in node.attr:
-                return [d.size for d in node.attr["shape"].shape.dim]
-            # Check for Const value shape
-            if node.op == "Const" and "value" in node.attr:
-                tensor = node.attr["value"].tensor
-                if tensor.HasField("tensor_shape"):
-                    return [d.size for d in tensor.tensor_shape.dim]
-            return None
-
-        # Helper to check if a node is definitely scalar
-        def _is_scalar(node_name):
-            shape = _get_shape(node_name)
-            return shape == []
-
-        # Helper to compute broadcast shape of two shapes
-        def _get_broadcast_shape(s1, s2):
-            if s1 is None or s2 is None:
-                return None
-            if s1 == s2:
-                return s1
-            if not s1:
-                return s2
-            if not s2:
-                return s1
-            
-            # Simple broadcasting logic
-            len1, len2 = len(s1), len(s2)
-            max_len = max(len1, len2)
-            result = []
-            for i in range(max_len):
-                d1 = s1[len1 - 1 - i] if i < len1 else 1
-                d2 = s2[len2 - 1 - i] if i < len2 else 1
-                if d1 == d2:
-                    result.append(d1)
-                elif d1 == 1:
-                    result.append(d2)
-                elif d2 == 1:
-                    result.append(d1)
-                else:
-                    return None # Incompatible
-            return result[::-1]
-
-        # Helper to check if simplification is shape-preserving
-        def _is_shape_preserving(source_shape, target_shape):
-            # If both are unknown, assume it's safe (common in simple tests)
-            if source_shape is None and target_shape is None:
-                return True
-            if source_shape is None or target_shape is None:
-                return False
-            return source_shape == target_shape
-
         # Rule: Add(x, 0) or Add(0, x)
         if op_type == "Add":
             left, right = inputs[0], inputs[1]
-            s_left, s_right = _get_shape(left), _get_shape(right)
-            s_res = _get_broadcast_shape(s_left, s_right)
+            s_left, s_right = self._get_shape(left, optimizer), self._get_shape(right, optimizer)
+            s_res = self._get_broadcast_shape(s_left, s_right)
 
-            if _is_const(left, 0) and _is_shape_preserving(s_res, s_right):
-                return _mapped_result(right)
-            if _is_const(right, 0) and _is_shape_preserving(s_res, s_left):
-                return _mapped_result(left)
+            if self._is_const(left, 0, optimizer) and self._is_shape_preserving(s_res, s_right):
+                return self._mapped_result(name, right)
+            if self._is_const(right, 0, optimizer) and self._is_shape_preserving(s_res, s_left):
+                return self._mapped_result(name, left)
             # Add(x, Neg(x)) -> 0 or Add(Neg(x), x) -> 0
-            # Note: This is a simplified check for Neg(x)
             for l, r in [(left, right), (right, left)]:
-                rn = _get_node(r)
+                rn = self._get_node(r, optimizer)
                 if rn and rn.op == "Neg" and rn.input[0] == l:
-                    s = _get_shape(l)
+                    s = self._get_shape(l, optimizer)
                     if s is not None:
-                        source = _get_node(l)
+                        source = self._get_node(l, optimizer)
                         dtype = source.attr.get("dtype", "float32") if source else "float32"
-                        return _new_node_result(
-                            create_const_node(name + "_zero", value=0, dtype=dtype, shape=s)
+                        return self._new_node_result(
+                            name, create_const_node(name + "_zero", value=0, dtype=dtype, shape=s)
                         )
 
         # Rule: Sub(x, 0) → x
         if op_type == "Sub":
             left, right = inputs[0], inputs[1]
-            if _is_const(right, 0) and (
-                _is_scalar(right) or _get_shape(right) == _get_shape(left)
+            if self._is_const(right, 0, optimizer) and (
+                self._is_scalar(right, optimizer) or self._get_shape(right, optimizer) == self._get_shape(left, optimizer)
             ):
-                return _mapped_result(left)
+                return self._mapped_result(name, left)
             # Sub(x, x) → 0
             if left == right:
-                s = _get_shape(left)
+                s = self._get_shape(left, optimizer)
                 if s is not None:
-                    source = _get_node(left)
+                    source = self._get_node(left, optimizer)
                     dtype = source.attr.get("dtype", "float32") if source else "float32"
-                    return _new_node_result(
-                        create_const_node(name + "_zero", value=0, dtype=dtype, shape=s)
+                    return self._new_node_result(
+                        name, create_const_node(name + "_zero", value=0, dtype=dtype, shape=s)
                     )
 
         # Rule: Mul(x, 1) or Mul(1, x)
         if op_type == "Mul":
             left, right = inputs[0], inputs[1]
-            s_left, s_right = _get_shape(left), _get_shape(right)
-            s_res = _get_broadcast_shape(s_left, s_right)
+            s_left, s_right = self._get_shape(left, optimizer), self._get_shape(right, optimizer)
+            s_res = self._get_broadcast_shape(s_left, s_right)
 
-            if _is_const(left, 1) and _is_shape_preserving(s_res, s_right):
-                return _mapped_result(right)
-            if _is_const(right, 1) and _is_shape_preserving(s_res, s_left):
-                return _mapped_result(left)
+            if self._is_const(left, 1, optimizer) and self._is_shape_preserving(s_res, s_right):
+                return self._mapped_result(name, right)
+            if self._is_const(right, 1, optimizer) and self._is_shape_preserving(s_res, s_left):
+                return self._mapped_result(name, left)
             # Mul(x, 0) → 0
-            if _is_const(left, 0) or _is_const(right, 0):
+            if self._is_const(left, 0, optimizer) or self._is_const(right, 0, optimizer):
                 if s_res is not None:
-                    source_name = right if _is_const(left, 0) else left
-                    source = _get_node(source_name)
+                    source_name = right if self._is_const(left, 0, optimizer) else left
+                    source = self._get_node(source_name, optimizer)
                     dtype = source.attr.get("dtype", "float32") if source else "float32"
-                    return _new_node_result(
-                        create_const_node(
+                    return self._new_node_result(
+                        name, create_const_node(
                             name + "_zero", value=0, dtype=dtype, shape=s_res
                         )
                     )
             # Mul(x, x) -> Square(x)
             if left == right:
-                return _new_node_result(
-                    create_node("Square", name + "_sq", inputs=[left])
+                return self._new_node_result(
+                    name, create_node("Square", name + "_sq", inputs=[left])
                 )
 
         # Rule: Div(x, 1) → x
         if op_type == "Div":
             left, right = inputs[0], inputs[1]
-            s_left, s_right = _get_shape(left), _get_shape(right)
-            s_res = _get_broadcast_shape(s_left, s_right)
-            if _is_const(right, 1) and _is_shape_preserving(s_res, s_left):
-                return _mapped_result(left)
+            s_left, s_right = self._get_shape(left, optimizer), self._get_shape(right, optimizer)
+            s_res = self._get_broadcast_shape(s_left, s_right)
+            if self._is_const(right, 1, optimizer) and self._is_shape_preserving(s_res, s_left):
+                return self._mapped_result(name, left)
             # Div(x, x) -> 1
             if left == right:
-                s = _get_shape(left)
+                s = self._get_shape(left, optimizer)
                 if s is not None:
-                    source = _get_node(left)
+                    source = self._get_node(left, optimizer)
                     dtype = source.attr.get("dtype", "float32") if source else "float32"
-                    return _new_node_result(
-                        create_const_node(name + "_one", value=1, dtype=dtype, shape=s)
+                    return self._new_node_result(
+                        name, create_const_node(name + "_one", value=1, dtype=dtype, shape=s)
                     )
 
         # Rule: Neg(Neg(x)) → x
         if op_type == "Neg":
-            inp = _get_node(inputs[0])
+            inp = self._get_node(inputs[0], optimizer)
             if inp and inp.op == "Neg":
-                return _mapped_result(inp.input[0])
+                return self._mapped_result(name, inp.input[0])
 
         # Rule: LogicalNot(LogicalNot(x)) → x
         if op_type == "LogicalNot":
-            inp = _get_node(inputs[0])
+            inp = self._get_node(inputs[0], optimizer)
             if inp and inp.op == "LogicalNot":
-                return _mapped_result(inp.input[0])
+                return self._mapped_result(name, inp.input[0])
 
         # Rule: Abs(Abs(x)) → Abs(x)
         if op_type == "Abs":
-            inp = _get_node(inputs[0])
+            inp = self._get_node(inputs[0], optimizer)
             if inp and inp.op == "Abs":
-                orig = _get_node(inp.input[0])
+                orig = self._get_node(inp.input[0], optimizer)
                 if orig:
-                    return _new_node_result(
-                        create_node("Abs", name + "_abs", inputs=[orig.name])
+                    return self._new_node_result(
+                        name, create_node("Abs", name + "_abs", inputs=[orig.name])
                     )
 
         # Rule: Square(Sqrt(x)) → x  (domain assumed ok)
         if op_type == "Square":
-            inp = _get_node(inputs[0])
+            inp = self._get_node(inputs[0], optimizer)
             if inp and inp.op == "Sqrt":
-                return _mapped_result(inp.input[0])
+                return self._mapped_result(name, inp.input[0])
 
         # Rule: Sqrt(Square(x)) → Abs(x)
         if op_type == "Sqrt":
-            inp = _get_node(inputs[0])
+            inp = self._get_node(inputs[0], optimizer)
             if inp and inp.op == "Square":
-                orig = _get_node(inp.input[0])
+                orig = self._get_node(inp.input[0], optimizer)
                 if orig:
-                    return _new_node_result(
-                        create_node("Abs", name + "_abs", inputs=[orig.name])
+                    return self._new_node_result(
+                        name, create_node("Abs", name + "_abs", inputs=[orig.name])
                     )
 
         # Rule: Pow(x, 1) -> x
         if op_type == "Pow":
             left, right = inputs[0], inputs[1]
-            s_left, s_right = _get_shape(left), _get_shape(right)
-            s_res = _get_broadcast_shape(s_left, s_right)
-            if _is_const(right, 1) and _is_shape_preserving(s_res, s_left):
-                return _mapped_result(left)
+            s_left, s_right = self._get_shape(left, optimizer), self._get_shape(right, optimizer)
+            s_res = self._get_broadcast_shape(s_left, s_right)
+            if self._is_const(right, 1, optimizer) and self._is_shape_preserving(s_res, s_left):
+                return self._mapped_result(name, left)
             # Pow(x, 2) -> Square(x)
-            if _is_const(right, 2) and _is_shape_preserving(s_res, s_left):
-                return _new_node_result(
-                    create_node("Square", name + "_sq", inputs=[left])
+            if self._is_const(right, 2, optimizer) and self._is_shape_preserving(s_res, s_left):
+                return self._new_node_result(
+                    name, create_node("Square", name + "_sq", inputs=[left])
                 )
 
-        # Helper for comparison results
-        def _comparison_const(val):
-            # Equal(x, x) -> True should have same shape as x (or broadcasted shape)
-            # If x is [2, 2], result is [2, 2] of True
-            s = _get_shape(inputs[0])
-            if s is None:
-                return None  # Safer to skip if shape unknown
-            return _new_node_result(
-                create_const_node(name + "_bool", value=val, dtype="bool", shape=s)
-            )
-
         # Rule: Equal(x, x) → True
-        if op_type == "Equal":
-            left, right = inputs[0], inputs[1]
-            if left == right:
-                return _comparison_const(True)
+        if op_type == "Equal" and inputs[0] == inputs[1]:
+            return self._bool_const(name, True, inputs, optimizer)
 
         # Rule: NotEqual(x, x) → False
-        if op_type == "NotEqual":
-            left, right = inputs[0], inputs[1]
-            if left == right:
-                return _comparison_const(False)
+        if op_type == "NotEqual" and inputs[0] == inputs[1]:
+            return self._bool_const(name, False, inputs, optimizer)
 
         # Rule: Less(x, x) → False ; Greater(x, x) → False
         if op_type in ("Less", "Greater") and inputs[0] == inputs[1]:
-            return _comparison_const(False)
+            return self._bool_const(name, False, inputs, optimizer)
 
         # Rule: LessEqual(x, x) → True ; GreaterEqual(x, x) → True
         if op_type in ("LessEqual", "GreaterEqual") and inputs[0] == inputs[1]:
-            return _comparison_const(True)
+            return self._bool_const(name, True, inputs, optimizer)
 
         # Rule: And(x, True) → x ; And(True, x) → x
         if op_type == "LogicalAnd":
             left, right = inputs[0], inputs[1]
-            s_left, s_right = _get_shape(left), _get_shape(right)
-            s_res = _get_broadcast_shape(s_left, s_right)
+            s_left, s_right = self._get_shape(left, optimizer), self._get_shape(right, optimizer)
+            s_res = self._get_broadcast_shape(s_left, s_right)
 
-            if _is_const(left, True) and _is_shape_preserving(s_res, s_right):
-                return _mapped_result(right)
-            if _is_const(right, True) and _is_shape_preserving(s_res, s_left):
-                return _mapped_result(left)
+            if self._is_const(left, True, optimizer) and self._is_shape_preserving(s_res, s_right):
+                return self._mapped_result(name, right)
+            if self._is_const(right, True, optimizer) and self._is_shape_preserving(s_res, s_left):
+                return self._mapped_result(name, left)
             # LogicalAnd(x, x) -> x
             if left == right:
-                return _mapped_result(left)
+                return self._mapped_result(name, left)
             # LogicalAnd(x, False) -> False
-            if _is_const(left, False) or _is_const(right, False):
+            if self._is_const(left, False, optimizer) or self._is_const(right, False, optimizer):
                 if s_res is not None:
-                    return _new_node_result(
-                        create_const_node(name + "_bool", value=False, dtype="bool", shape=s_res)
+                    return self._new_node_result(
+                        name, create_const_node(name + "_bool", value=False, dtype="bool", shape=s_res)
                     )
 
         # Rule: Or(x, False) → x ; Or(False, x) → x
         if op_type == "LogicalOr":
             left, right = inputs[0], inputs[1]
-            s_left, s_right = _get_shape(left), _get_shape(right)
-            s_res = _get_broadcast_shape(s_left, s_right)
+            s_left, s_right = self._get_shape(left, optimizer), self._get_shape(right, optimizer)
+            s_res = self._get_broadcast_shape(s_left, s_right)
 
-            if _is_const(left, False) and _is_shape_preserving(s_res, s_right):
-                return _mapped_result(right)
-            if _is_const(right, False) and _is_shape_preserving(s_res, s_left):
-                return _mapped_result(left)
+            if self._is_const(left, False, optimizer) and self._is_shape_preserving(s_res, s_right):
+                return self._mapped_result(name, right)
+            if self._is_const(right, False, optimizer) and self._is_shape_preserving(s_res, s_left):
+                return self._mapped_result(name, left)
             # LogicalOr(x, x) -> x
             if left == right:
-                return _mapped_result(left)
+                return self._mapped_result(name, left)
             # LogicalOr(x, True) -> True
-            if _is_const(left, True) or _is_const(right, True):
+            if self._is_const(left, True, optimizer) or self._is_const(right, True, optimizer):
                 if s_res is not None:
-                    return _new_node_result(
-                        create_const_node(name + "_bool", value=True, dtype="bool", shape=s_res)
+                    return self._new_node_result(
+                        name, create_const_node(name + "_bool", value=True, dtype="bool", shape=s_res)
                     )
 
         # Rule: Select(cond, x, x) → x
         if op_type == "Select":
             if len(inputs) >= 3 and inputs[1] == inputs[2]:
-                return _mapped_result(inputs[1])
+                return self._mapped_result(name, inputs[1])
 
         # Rule: Identity(x) -> x (bypass or collapse nested Identity)
         if op_type == "Identity":
@@ -410,14 +400,14 @@ class AlgebraicSimplifyPass(PatternRewritePass):
             if "_class" in node.attr:
                 return None
             # Collapse nested Identity
-            inp_node = _get_node(inputs[0])
+            inp_node = self._get_node(inputs[0], optimizer)
             if inp_node and inp_node.op == "Identity":
                 inner_input = inp_node.input[0]
                 new_node = create_node(
                     "Identity", name + "_collapsed", inputs=[inner_input]
                 )
-                return _new_node_result(new_node)
+                return self._new_node_result(name, new_node)
             # Bypass single Identity
-            return _mapped_result(inputs[0])
+            return self._mapped_result(name, inputs[0])
 
         return None
