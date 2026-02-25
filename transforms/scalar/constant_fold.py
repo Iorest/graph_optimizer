@@ -48,7 +48,7 @@ from graph_optimizer.core import (
     Any,
     RewriteResult,
 )
-from graph_optimizer.utils.graph_utils import create_node, create_const_node
+from graph_optimizer.utils.graph_utils import create_const_node
 
 
 @PassRegistry.register("constant_fold", opt_level=1, priority=5)
@@ -141,6 +141,20 @@ class ConstantFoldPass(PatternRewritePass):
                 with np.errstate(divide="ignore", invalid="ignore"):
                     res = np.divide(x, y)
                 return res
+
+            def _floor_div(x, y):
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    return np.floor_divide(x, y)
+
+            def _floor_mod(x, y):
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    return np.mod(x, y)
+
+            def _maximum(x, y):
+                return np.maximum(x, y)
+
+            def _minimum(x, y):
+                return np.minimum(x, y)
 
             def _neg(x):
                 return np.negative(x)
@@ -261,6 +275,11 @@ class ConstantFoldPass(PatternRewritePass):
                 "Mul": lambda: _mul(*arrays[:2]),
                 "Sub": lambda: _sub(*arrays[:2]),
                 "Div": lambda: _div(*arrays[:2]),
+                "RealDiv": lambda: _div(*arrays[:2]),
+                "FloorDiv": lambda: _floor_div(*arrays[:2]),
+                "FloorMod": lambda: _floor_mod(*arrays[:2]),
+                "Maximum": lambda: _maximum(*arrays[:2]),
+                "Minimum": lambda: _minimum(*arrays[:2]),
                 "Neg": lambda: _neg(arrays[0]),
                 "Equal": lambda: _equal(*arrays[:2]),
                 "NotEqual": lambda: _not_equal(*arrays[:2]),

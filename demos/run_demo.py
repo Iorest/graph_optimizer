@@ -218,10 +218,10 @@ def main():
         level=3,
         debug=True,  # 启用 debug 模式，生成 run_+时间 目录
         output_nodes=["predicts"],
-        protected_nodes=[],
+        protected_nodes=["compile_batch_size_ret"],
         remove_passes=[],  # 启用所有 passes
     )
-    pipeline.run()
+    pipeline.run().print_summary()
 
     # Load optimized graph
     optimized_graph = load_graph(output_path)

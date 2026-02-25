@@ -1,9 +1,13 @@
 import os
+import time
 import datetime
 import logging
+import traceback
+import tensorflow.compat.v1 as tf
 from typing import List, Optional, Dict, Any, Iterable
-from .core import GraphOptimizer, PassRegistry
+from .core import GraphOptimizer, PassRegistry, OptimizationContext
 from .utils import load_graph, save_graph, logger as custom_logger
+from .utils.reporting import OptimizationReport
 
 
 class OptimizationPipeline:
@@ -85,6 +89,65 @@ class OptimizationPipeline:
         self.debug_dir = None
         self.resolved_passes = []
 
+    # =========================================================================
+    # Fluent API (Chaining)
+    # =========================================================================
+
+    def with_input(self, input_graph: str):
+        """Sets input graph path."""
+        self.input_graph = input_graph
+        return self
+
+    def with_output(self, output_graph: str):
+        """Sets output graph path."""
+        self.output_graph = output_graph
+        return self
+
+    def with_level(self, level: int):
+        """Sets optimization level."""
+        self.level = level
+        return self
+
+    def with_debug(self, debug: bool = True):
+        """Enables/disables debug mode."""
+        self.debug = debug
+        return self
+
+    def add_pass(self, pass_name: str):
+        """Appends a pass to the sequence."""
+        if pass_name not in self.add_passes:
+            self.add_passes.append(pass_name)
+        return self
+
+    def remove_pass(self, pass_name: str):
+        """Removes a pass from the sequence."""
+        if pass_name not in self.remove_passes:
+            self.remove_passes.append(pass_name)
+        return self
+
+    def with_protected_nodes(self, nodes: Iterable[str]):
+        """Adds nodes to protected set."""
+        for n in nodes:
+            if n not in self.protected_nodes:
+                self.protected_nodes.append(n)
+        return self
+
+    def with_output_nodes(self, nodes: Iterable[str]):
+        """Sets output nodes (and protects them)."""
+        for n in nodes:
+            if n not in self.output_nodes:
+                self.output_nodes.append(n)
+            if n not in self.protected_nodes:
+                self.protected_nodes.append(n)
+        return self
+
+    def with_cleanup(self, enabled: bool = True, passes: Optional[List[str]] = None):
+        """Configures intermediate cleanup passes."""
+        self.run_cleanup_between_passes = enabled
+        if passes:
+            self.cleanup_passes = passes
+        return self
+
     def _apply_config(self, config):
         """Merges configuration dict into instance attributes."""
         if "input_graph" in config and not self.input_graph:
@@ -142,7 +205,9 @@ class OptimizationPipeline:
         """Determines the final list of passes to execute."""
         if self.passes:
             final_passes = list(self.passes)
-            custom_logger.debug(f"Using explicit pass list: {final_passes}")
+            custom_logger.debug(
+                f"Using explicit pass list (no ordering enforced by registry): {final_passes}"
+            )
         else:
             final_passes = PassRegistry.get_passes_by_level(self.level)
             custom_logger.info(
@@ -163,14 +228,9 @@ class OptimizationPipeline:
                         f"Pass '{p}' in remove_passes was not in the list"
                     )
 
-        # Priority sorting is handled by get_passes_by_level, but added passes might not be sorted.
-        # Ideally, we should fetch priority for all checks and sort again?
-        # User requirement: "sort passes by priority".
-        # If I explicit add 'p', it might be out of order.
-        # I should re-sort final_passes based on metadata logic if possible.
-        # PassRegistry has metadata.
-        # Let's re-sort to be safe.
-        final_passes.sort(key=self._get_pass_priority)
+            # Only re-sort if we're using default Level passes + additions,
+            # this ensures added passes are placed in their proper priority order
+            final_passes = PassRegistry.sort_passes(final_passes)
 
         # Filter out passes that are already in cleanup_passes (avoid duplicate execution)
         if self.run_cleanup_between_passes and self.cleanup_passes:
@@ -186,176 +246,136 @@ class OptimizationPipeline:
 
         self.resolved_passes = final_passes
 
-    def _get_pass_priority(self, name):
-        meta = PassRegistry._pass_metadata.get(name)
-        if meta and "priority" in meta:
-            return (meta["priority"], name)
-        return (100, name)  # Default priority
+    def _run_single_pass(
+        self,
+        optimizer,
+        context,
+        pass_name,
+        step_num=None,
+        pass_name_override=None,
+        save_debug_suffix=None,
+    ):
+        """Safely executes a single pass with rollback on failure."""
+        if pass_name not in PassRegistry._registered_passes:
+            custom_logger.warning(
+                f"Pass '{pass_name}' not found in registry. Skipping."
+            )
+            return False
 
-    def _run_cleanup_passes(self, optimizer, opt_context, step_num, is_final=False):
-        """
-        Run cleanup passes (CSE, constant folding, etc.) after a main optimization pass.
+        # Create a backup copy of the graph def for potential rollback
+        backup_graph = tf.GraphDef()
+        backup_graph.CopyFrom(optimizer.graph_def)
 
-        Args:
-            optimizer: GraphOptimizer instance
-            opt_context: OptimizationContext for tracking statistics (optional for backward compat)
-            step_num: Current step number (0 for initial, N for after step N, N+1 for final)
-            is_final: True if this is the final cleanup after all main passes
-        """
+        try:
+            pass_instance = PassRegistry.get_pass(pass_name)
+            optimizer.clear_transformations()
+
+            # Pass step=None if we are handling debug saving manually via save_debug_suffix
+            pass_step = step_num if not save_debug_suffix else None
+
+            pass_instance.transform(
+                optimizer,
+                step=pass_step,
+                debug_dir=self.debug_dir if not save_debug_suffix else None,
+                context=context,
+                pass_name_override=pass_name_override,
+            )
+
+            # Manual debug graph save for cleanup passes
+            if save_debug_suffix and self.debug_dir:
+                debug_filename = f"{save_debug_suffix}.pb"
+                cleanup_debug_path = os.path.join(self.debug_dir, debug_filename)
+                save_graph(optimizer.graph_def, cleanup_debug_path)
+                custom_logger.debug(f"Saved debug graph to {cleanup_debug_path}")
+
+            return True
+
+        except Exception as e:
+            error_pass_name = pass_name_override or pass_name
+            custom_logger.error(f"Error applying pass '{error_pass_name}': {e}")
+            custom_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
+            custom_logger.warning(
+                f"Rolling back graph state before pass '{error_pass_name}'..."
+            )
+            optimizer.load_state(backup_graph)
+            return False
+
+    def _run_cleanup_passes(self, optimizer, context, step_num, is_final=False):
+        """Run configured cleanup passes after a main optimization pass."""
         if not self.cleanup_passes:
             return
 
-        # Determine context string for logging
-        if is_final:
-            context_str = "final"
-        elif step_num == 0:
-            context_str = "initial (before main passes)"
-        else:
-            context_str = f"after step {step_num}"
+        context_str = (
+            "final"
+            if is_final
+            else ("initial" if step_num == 0 else f"after step {step_num}")
+        )
 
-        for cleanup_pass_name in self.cleanup_passes:
-            if cleanup_pass_name not in PassRegistry._registered_passes:
-                custom_logger.warning(
-                    f"Cleanup pass '{cleanup_pass_name}' not found in registry. Skipping."
-                )
-                continue
-
+        for pass_name in self.cleanup_passes:
             try:
-                cleanup_instance = PassRegistry.get_pass(cleanup_pass_name)
-                custom_logger.debug(
-                    f"Running cleanup pass '{cleanup_pass_name}' {context_str}..."
-                )
-
-                # Clear transformations before cleanup pass
-                optimizer.clear_transformations()
-
-                # Determine debug file path
-                if self.debug_dir:
-                    if is_final:
-                        debug_filename = (
-                            f"{step_num:02d}_{cleanup_pass_name}_final_cleanup.pb"
-                        )
-                    elif step_num == 0:
-                        debug_filename = f"00_{cleanup_pass_name}_initial_cleanup.pb"
-                    else:
-                        debug_filename = (
-                            f"{step_num:02d}_{cleanup_pass_name}_cleanup.pb"
-                        )
-                    cleanup_debug_path = os.path.join(self.debug_dir, debug_filename)
-                else:
-                    cleanup_debug_path = None
-
-                # Use unique name for statistics
-                if is_final:
-                    stats_name = f"{cleanup_instance.name} (cleanup@final)"
-                elif step_num == 0:
-                    stats_name = f"{cleanup_instance.name} (cleanup@init)"
-                else:
-                    stats_name = f"{cleanup_instance.name} (cleanup@{step_num})"
-
-                # Run cleanup pass with name override for separate statistics
-                # Pass step=None to prevent BasePass from saving its own debug file
-                cleanup_instance.transform(
-                    optimizer,
-                    step=None,  # Disable auto-save in BasePass, we save manually below
-                    debug_dir=None,
-                    context=opt_context,
-                    pass_name_override=stats_name,
-                )
-
-                # Save cleanup result
-                if cleanup_debug_path:
-                    save_graph(optimizer.graph_def, cleanup_debug_path)
-                    custom_logger.debug(f"Saved cleanup graph to {cleanup_debug_path}")
-
-            except Exception as e:
-                import traceback
-
-                custom_logger.warning(
-                    f"Error in cleanup pass '{cleanup_pass_name}': {e}"
-                )
-                custom_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
-                # Don't rollback for cleanup passes, just continue
-
-    def _execute_main_passes(self, optimizer, context):
-        """
-        Execute all main optimization passes.
-
-        Args:
-            optimizer: GraphOptimizer instance
-            context: OptimizationContext for tracking statistics
-        """
-        import tensorflow.compat.v1 as tf
-
-        for i, pass_name in enumerate(self.resolved_passes):
-            if pass_name not in PassRegistry._registered_passes:
+                pass_instance = PassRegistry.get_pass(pass_name)
+            except ValueError:
                 custom_logger.warning(
                     f"Pass '{pass_name}' not found in registry. Skipping."
                 )
                 continue
 
-            try:
-                # Create a backup copy of the graph def for potential rollback
-                backup_graph = tf.GraphDef()
-                backup_graph.CopyFrom(optimizer.graph_def)
+            custom_logger.debug(f"Running cleanup pass '{pass_name}' {context_str}...")
 
-                # Get pass instance and clear old transformations
-                pass_instance = PassRegistry.get_pass(pass_name)
-                optimizer.clear_transformations()
+            # Determine debug file suffix and stats name
+            if is_final:
+                debug_suffix = f"{step_num:02d}_{pass_name}_final_cleanup"
+                stats_name = f"{pass_instance.name} (cleanup@final)"
+            elif step_num == 0:
+                debug_suffix = f"00_{pass_name}_initial_cleanup"
+                stats_name = f"{pass_instance.name} (cleanup@init)"
+            else:
+                debug_suffix = f"{step_num:02d}_{pass_name}_cleanup"
+                stats_name = f"{pass_instance.name} (cleanup@{step_num})"
 
-                # Execute the pass with shared context
-                pass_instance.transform(
-                    optimizer,
-                    step=i + 1,
-                    debug_dir=self.debug_dir,
-                    context=context,
-                )
+            self._run_single_pass(
+                optimizer,
+                context,
+                pass_name,
+                pass_name_override=stats_name,
+                save_debug_suffix=debug_suffix,
+            )
 
-            except Exception as e:
-                import traceback
+    def _execute_main_passes(self, optimizer, context):
+        """Execute all main optimization passes sequentially."""
+        for i, pass_name in enumerate(self.resolved_passes):
+            success = self._run_single_pass(
+                optimizer, context, pass_name, step_num=i + 1
+            )
 
-                print(f"CRITICAL ERROR in {pass_name}: {e}")
-                traceback.print_exc()
-
-                custom_logger.error(f"Error applying pass '{pass_name}': {e}")
-                custom_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
-                custom_logger.warning(
-                    f"Rolling back graph state before pass '{pass_name}'..."
-                )
-                optimizer.load_state(backup_graph)
-                # Continue execution of other passes
-                continue
-
-            # Run cleanup passes after each main pass (if enabled)
-            # Optimization: Skip cleanup after the very last pass here,
-            # because the final cleanup phase will handle it.
+            # Skip cleanup if pass failed (as graph was rolled back anyway),
+            # or if this is the last pass (handled by final cleanup)
             is_last_pass = i == len(self.resolved_passes) - 1
-            if self.run_cleanup_between_passes and not is_last_pass:
+            if success and self.run_cleanup_between_passes and not is_last_pass:
                 self._run_cleanup_passes(
                     optimizer, context, step_num=i + 1, is_final=False
                 )
 
-    def run(self):
-        """Executes the optimization pipeline."""
-        import time
-        from .core import OptimizationContext
-
-        self._setup_logging_and_debug()
-        self._resolve_passes()
-
-        # Priority: graph_def > input_graph
+    def _load_graph(self):
+        """Loads or returns the initial graph definition."""
         if self.graph_def is not None:
             custom_logger.debug("Using provided graph_def object")
-            graph_def = self.graph_def
+            return self.graph_def
         elif self.input_graph:
             custom_logger.info(f"Loading graph from {self.input_graph}")
             try:
-                graph_def = load_graph(self.input_graph)
+                return load_graph(self.input_graph)
             except Exception as e:
                 custom_logger.error(f"Failed to load graph: {e}")
                 raise
         else:
             raise ValueError("Either graph_def or input_graph must be provided.")
+
+    def run(self):
+        """Executes the optimization pipeline."""
+        self._setup_logging_and_debug()
+        self._resolve_passes()
+        graph_def = self._load_graph()
 
         custom_logger.info("Initializing optimizer...")
         optimizer = GraphOptimizer(graph_def)
@@ -375,7 +395,6 @@ class OptimizationPipeline:
                 f"Cleanup passes between main passes: {self.cleanup_passes}"
             )
 
-        # Log protected nodes (output nodes + explicitly protected nodes)
         if self.protected_nodes:
             custom_logger.info(
                 f"Protected nodes ({len(self.protected_nodes)}): {self.protected_nodes}"
@@ -388,48 +407,54 @@ class OptimizationPipeline:
             debug_dir=self.debug_dir,
         )
 
-        # Start timing
         start_time = time.time()
+        try:
+            # Run initial cleanup passes before all main passes (if enabled)
+            if self.run_cleanup_between_passes and self.cleanup_passes:
+                custom_logger.debug(
+                    f"Running initial cleanup passes: {self.cleanup_passes}"
+                )
+                self._run_cleanup_passes(optimizer, context, step_num=0, is_final=False)
 
-        # Run initial cleanup passes before all main passes (if enabled)
-        if self.run_cleanup_between_passes and self.cleanup_passes:
-            custom_logger.debug(
-                f"Running initial cleanup passes: {self.cleanup_passes}"
+            # Execute all main optimization passes
+            self._execute_main_passes(optimizer, context)
+
+            # Run final cleanup passes after all main passes are done
+            if self.run_cleanup_between_passes and self.cleanup_passes:
+                custom_logger.debug(
+                    f"Running final cleanup passes: {self.cleanup_passes}"
+                )
+                self._run_cleanup_passes(
+                    optimizer,
+                    context,
+                    step_num=len(self.resolved_passes) + 1,
+                    is_final=True,
+                )
+        finally:
+            total_time = time.time() - start_time
+            final_node_count = len(optimizer.nodes)
+
+            if self.output_graph:
+                custom_logger.info(f"Saving optimized graph to {self.output_graph}")
+                save_graph(optimizer.graph_def, self.output_graph)
+
+            if self.debug_dir:
+                save_graph(
+                    optimizer.graph_def, os.path.join(self.debug_dir, "final.pb")
+                )
+
+            # Log final summary
+            self._log_final_summary(
+                context, initial_node_count, final_node_count, total_time
             )
-            self._run_cleanup_passes(optimizer, context, step_num=0, is_final=False)
 
-        # Execute all main optimization passes
-        self._execute_main_passes(optimizer, context)
-
-        # Run final cleanup passes after all main passes are done
-        # Only run if run_cleanup_between_passes is True
-        if self.run_cleanup_between_passes and self.cleanup_passes:
-            custom_logger.debug(f"Running final cleanup passes: {self.cleanup_passes}")
-            self._run_cleanup_passes(
-                optimizer,
-                context,
-                step_num=len(self.resolved_passes) + 1,
-                is_final=True,
-            )
-
-        # Calculate total time
-        total_time = time.time() - start_time
-        final_node_count = len(optimizer.nodes)
-        nodes_removed = initial_node_count - final_node_count
-
-        if self.output_graph:
-            custom_logger.info(f"Saving optimized graph to {self.output_graph}")
-            save_graph(optimizer.graph_def, self.output_graph)
-
-        if self.debug_dir:
-            save_graph(optimizer.graph_def, os.path.join(self.debug_dir, "final.pb"))
-
-        # Log final summary
-        self._log_final_summary(
-            context, initial_node_count, final_node_count, total_time
+        return OptimizationReport(
+            initial_nodes=initial_node_count,
+            final_nodes=final_node_count,
+            total_time=total_time,
+            pass_stats=context._pass_stats,
+            graph_def=optimizer.graph_def,
         )
-
-        return optimizer.graph_def
 
     def _log_final_summary(
         self, context, initial_node_count, final_node_count, total_time
@@ -453,13 +478,18 @@ class OptimizationPipeline:
             custom_logger.info("-" * 70)
 
             for pass_name, stats in context._pass_stats.items():
-                iterations = len(stats["iterations"])
-                total_changes = stats["total_changes"]
-                nodes_before = stats["nodes_before"]
-                nodes_after = stats["nodes_after"]
-                duration = stats["duration"]
+                duration = stats.get("duration", 0.0)
+                if stats.get("failed"):
+                    custom_logger.info(
+                        f"  {pass_name:<28} {'FAILED':>6} {'-':>8} {'-':>15} {duration:>7.3f}s"
+                    )
+                    continue
 
-                node_diff = nodes_before - nodes_after
+                iterations = len(stats.get("iterations", []))
+                total_changes = stats.get("total_changes", 0)
+                nodes_before = stats.get("nodes_before", 0)
+                nodes_after = stats.get("nodes_after", 0)
+
                 nodes_str = (
                     f"{nodes_before} -> {nodes_after}" if nodes_before > 0 else "N/A"
                 )

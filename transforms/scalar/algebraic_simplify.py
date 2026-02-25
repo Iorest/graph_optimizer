@@ -157,7 +157,7 @@ class AlgebraicSimplifyPass(PatternRewritePass):
                 return s2
             if not s2:
                 return s1
-            
+
             # Simple broadcasting logic
             len1, len2 = len(s1), len(s2)
             max_len = max(len1, len2)
@@ -172,7 +172,7 @@ class AlgebraicSimplifyPass(PatternRewritePass):
                 elif d2 == 1:
                     result.append(d1)
                 else:
-                    return None # Incompatible
+                    return None  # Incompatible
             return result[::-1]
 
         # Helper to check if simplification is shape-preserving
@@ -184,6 +184,29 @@ class AlgebraicSimplifyPass(PatternRewritePass):
                 return False
             return source_shape == target_shape
 
+        # Helper to create a numeric constant
+        def _numeric_const(val, ref_name, custom_shape=None):
+            s = custom_shape if custom_shape is not None else _get_shape(ref_name)
+            if s is None:
+                return None
+            source = _get_node(ref_name)
+            dtype = source.attr.get("dtype", "float32") if source else "float32"
+            suffix = (
+                "zero"
+                if val == 0
+                else "one"
+                if val == 1
+                else str(val).replace(".", "_")
+            )
+            return _new_node_result(
+                create_const_node(name + "_" + suffix, value=val, dtype=dtype, shape=s)
+            )
+
+        # Rule: Maximum(x, x) -> x, Minimum(x, x) -> x
+        if op_type in ("Maximum", "Minimum"):
+            if inputs[0] == inputs[1]:
+                return _mapped_result(inputs[0])
+
         # Rule: Add(x, 0) or Add(0, x)
         if op_type == "Add":
             left, right = inputs[0], inputs[1]
@@ -194,18 +217,10 @@ class AlgebraicSimplifyPass(PatternRewritePass):
                 return _mapped_result(right)
             if _is_const(right, 0) and _is_shape_preserving(s_res, s_left):
                 return _mapped_result(left)
-            # Add(x, Neg(x)) -> 0 or Add(Neg(x), x) -> 0
-            # Note: This is a simplified check for Neg(x)
             for l, r in [(left, right), (right, left)]:
                 rn = _get_node(r)
                 if rn and rn.op == "Neg" and rn.input[0] == l:
-                    s = _get_shape(l)
-                    if s is not None:
-                        source = _get_node(l)
-                        dtype = source.attr.get("dtype", "float32") if source else "float32"
-                        return _new_node_result(
-                            create_const_node(name + "_zero", value=0, dtype=dtype, shape=s)
-                        )
+                    return _numeric_const(0, l)
 
         # Rule: Sub(x, 0) → x
         if op_type == "Sub":
@@ -216,13 +231,7 @@ class AlgebraicSimplifyPass(PatternRewritePass):
                 return _mapped_result(left)
             # Sub(x, x) → 0
             if left == right:
-                s = _get_shape(left)
-                if s is not None:
-                    source = _get_node(left)
-                    dtype = source.attr.get("dtype", "float32") if source else "float32"
-                    return _new_node_result(
-                        create_const_node(name + "_zero", value=0, dtype=dtype, shape=s)
-                    )
+                return _numeric_const(0, left)
 
         # Rule: Mul(x, 1) or Mul(1, x)
         if op_type == "Mul":
@@ -238,35 +247,43 @@ class AlgebraicSimplifyPass(PatternRewritePass):
             if _is_const(left, 0) or _is_const(right, 0):
                 if s_res is not None:
                     source_name = right if _is_const(left, 0) else left
-                    source = _get_node(source_name)
-                    dtype = source.attr.get("dtype", "float32") if source else "float32"
-                    return _new_node_result(
-                        create_const_node(
-                            name + "_zero", value=0, dtype=dtype, shape=s_res
-                        )
-                    )
+                    return _numeric_const(0, source_name, custom_shape=s_res)
             # Mul(x, x) -> Square(x)
             if left == right:
                 return _new_node_result(
                     create_node("Square", name + "_sq", inputs=[left])
                 )
 
-        # Rule: Div(x, 1) → x
-        if op_type == "Div":
+        # Rule: Div/RealDiv/FloorDiv
+        if op_type in ("Div", "RealDiv", "FloorDiv"):
             left, right = inputs[0], inputs[1]
             s_left, s_right = _get_shape(left), _get_shape(right)
             s_res = _get_broadcast_shape(s_left, s_right)
+
+            # x / 1 -> x
             if _is_const(right, 1) and _is_shape_preserving(s_res, s_left):
                 return _mapped_result(left)
-            # Div(x, x) -> 1
+            # x / x -> 1
             if left == right:
-                s = _get_shape(left)
-                if s is not None:
-                    source = _get_node(left)
-                    dtype = source.attr.get("dtype", "float32") if source else "float32"
-                    return _new_node_result(
-                        create_const_node(name + "_one", value=1, dtype=dtype, shape=s)
-                    )
+                return _numeric_const(1, left)
+            # 0 / x -> 0
+            if _is_const(left, 0):
+                if s_res is not None:
+                    return _numeric_const(0, right, custom_shape=s_res)
+
+        # Rule: FloorMod
+        if op_type == "FloorMod":
+            left, right = inputs[0], inputs[1]
+            s_left, s_right = _get_shape(left), _get_shape(right)
+            s_res = _get_broadcast_shape(s_left, s_right)
+
+            # x % 1 -> 0
+            if _is_const(right, 1):
+                if s_res is not None:
+                    return _numeric_const(0, left, custom_shape=s_res)
+            # x % x -> 0
+            if left == right:
+                return _numeric_const(0, left)
 
         # Rule: Neg(Neg(x)) → x
         if op_type == "Neg":
@@ -367,7 +384,9 @@ class AlgebraicSimplifyPass(PatternRewritePass):
             if _is_const(left, False) or _is_const(right, False):
                 if s_res is not None:
                     return _new_node_result(
-                        create_const_node(name + "_bool", value=False, dtype="bool", shape=s_res)
+                        create_const_node(
+                            name + "_bool", value=False, dtype="bool", shape=s_res
+                        )
                     )
 
         # Rule: Or(x, False) → x ; Or(False, x) → x
@@ -387,7 +406,9 @@ class AlgebraicSimplifyPass(PatternRewritePass):
             if _is_const(left, True) or _is_const(right, True):
                 if s_res is not None:
                     return _new_node_result(
-                        create_const_node(name + "_bool", value=True, dtype="bool", shape=s_res)
+                        create_const_node(
+                            name + "_bool", value=True, dtype="bool", shape=s_res
+                        )
                     )
 
         # Rule: Select(cond, x, x) → x

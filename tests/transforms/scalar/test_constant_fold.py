@@ -158,6 +158,101 @@ class ConstantFoldPassTest(unittest.TestCase):
         arr = tensor_util.MakeNdarray(folded[0].attr["value"].tensor)
         self.assertTrue(np.isnan(arr[0]))
 
+    def test_maximum_fold(self):
+        const_a = create_const_node("a", value=[1, 5], dtype="int32", shape=[2])
+        const_b = create_const_node("b", value=[2, 4], dtype="int32", shape=[2])
+        maximum = create_node("Maximum", name="maximum", inputs=["a", "b"])
+        graph = self.create_graph([const_a, const_b, maximum])
+
+        optimizer = GraphOptimizer(graph)
+        fold_pass = ConstantFoldPass()
+        fold_pass.transform(
+            optimizer, auto_cleanup=True, protected_nodes=["maximum_folded"]
+        )
+
+        folded = [n for n in optimizer.graph_def.node if n.name == "maximum_folded"]
+        self.assertEqual(len(folded), 1)
+        from tensorflow.python.framework import tensor_util
+
+        arr = tensor_util.MakeNdarray(folded[0].attr["value"].tensor).tolist()
+        self.assertEqual(arr, [2, 5])
+
+    def test_minimum_fold(self):
+        const_a = create_const_node("a", value=[1, 5], dtype="int32", shape=[2])
+        const_b = create_const_node("b", value=[2, 4], dtype="int32", shape=[2])
+        minimum = create_node("Minimum", name="minimum", inputs=["a", "b"])
+        graph = self.create_graph([const_a, const_b, minimum])
+
+        optimizer = GraphOptimizer(graph)
+        fold_pass = ConstantFoldPass()
+        fold_pass.transform(
+            optimizer, auto_cleanup=True, protected_nodes=["minimum_folded"]
+        )
+
+        folded = [n for n in optimizer.graph_def.node if n.name == "minimum_folded"]
+        self.assertEqual(len(folded), 1)
+        from tensorflow.python.framework import tensor_util
+
+        arr = tensor_util.MakeNdarray(folded[0].attr["value"].tensor).tolist()
+        self.assertEqual(arr, [1, 4])
+
+    def test_floor_div_fold(self):
+        const_a = create_const_node("a", value=[5, -5], dtype="int32", shape=[2])
+        const_b = create_const_node("b", value=[2, 2], dtype="int32", shape=[2])
+        floor_div = create_node("FloorDiv", name="floor_div", inputs=["a", "b"])
+        graph = self.create_graph([const_a, const_b, floor_div])
+
+        optimizer = GraphOptimizer(graph)
+        fold_pass = ConstantFoldPass()
+        fold_pass.transform(
+            optimizer, auto_cleanup=True, protected_nodes=["floor_div_folded"]
+        )
+
+        folded = [n for n in optimizer.graph_def.node if n.name == "floor_div_folded"]
+        self.assertEqual(len(folded), 1)
+        from tensorflow.python.framework import tensor_util
+
+        arr = tensor_util.MakeNdarray(folded[0].attr["value"].tensor).tolist()
+        self.assertEqual(arr, [2, -3])
+
+    def test_floor_mod_fold(self):
+        const_a = create_const_node("a", value=[5, -5], dtype="int32", shape=[2])
+        const_b = create_const_node("b", value=[2, 2], dtype="int32", shape=[2])
+        floor_mod = create_node("FloorMod", name="floor_mod", inputs=["a", "b"])
+        graph = self.create_graph([const_a, const_b, floor_mod])
+
+        optimizer = GraphOptimizer(graph)
+        fold_pass = ConstantFoldPass()
+        fold_pass.transform(
+            optimizer, auto_cleanup=True, protected_nodes=["floor_mod_folded"]
+        )
+
+        folded = [n for n in optimizer.graph_def.node if n.name == "floor_mod_folded"]
+        self.assertEqual(len(folded), 1)
+        from tensorflow.python.framework import tensor_util
+
+        arr = tensor_util.MakeNdarray(folded[0].attr["value"].tensor).tolist()
+        self.assertEqual(arr, [1, 1])
+
+    def test_real_div_fold(self):
+        const_a = create_const_node("a", value=[5.0, 6.0], dtype="float32", shape=[2])
+        const_b = create_const_node("b", value=[2.0, 3.0], dtype="float32", shape=[2])
+        real_div = create_node("RealDiv", name="real_div", inputs=["a", "b"])
+        graph = self.create_graph([const_a, const_b, real_div])
+
+        optimizer = GraphOptimizer(graph)
+        fold_pass = ConstantFoldPass()
+        fold_pass.transform(
+            optimizer, auto_cleanup=True, protected_nodes=["real_div_folded"]
+        )
+
+        folded = [n for n in optimizer.graph_def.node if n.name == "real_div_folded"]
+        self.assertEqual(len(folded), 1)
+        from tensorflow.python.framework import tensor_util
+
+        arr = tensor_util.MakeNdarray(folded[0].attr["value"].tensor).tolist()
+        self.assertEqual(arr, [2.5, 2.0])
+
 
 if __name__ == "__main__":
     unittest.main()

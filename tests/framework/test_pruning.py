@@ -23,6 +23,7 @@ tf.disable_v2_behavior()
 
 class TestPruning(unittest.TestCase):
     """图裁剪测试套件。"""
+
     def setUp(self):
         tf.reset_default_graph()
 
@@ -55,7 +56,7 @@ class TestPruning(unittest.TestCase):
         graph_def.node.append(create_node("Mul", "c", inputs=["a", "b"]))
 
         optimizer = GraphOptimizer(graph_def)
-        refs = optimizer._compute_reference_counts(graph_def)
+        refs = optimizer.compute_reference_counts(graph_def)
         self.assertEqual(refs["a"], 3)
         self.assertEqual(refs["b"], 1)
 
@@ -63,7 +64,7 @@ class TestPruning(unittest.TestCase):
         graph_def = tf.GraphDef()
         graph_def.node.append(create_node("Placeholder", "unused"))
         optimizer = GraphOptimizer(graph_def)
-        pruned = optimizer._final_prune(graph_def, "test")
+        pruned = optimizer.final_prune(graph_def, "test")
         self.assertIn("unused", [n.name for n in pruned.node])
 
 

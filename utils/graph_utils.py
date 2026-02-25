@@ -132,6 +132,35 @@ def make_output_shapes_attr(shapes: List[List[int]]) -> attr_value_pb2.AttrValue
 # =======================
 
 
+def get_attr_value(attr_proto):
+    """Unwraps a TensorFlow AttrValue proto into a Python literal."""
+    if attr_proto is None:
+        return None
+    field = attr_proto.WhichOneof("value")
+    if field == "s":
+        return attr_proto.s.decode("utf-8")
+    if field == "i":
+        return attr_proto.i
+    if field == "f":
+        return attr_proto.f
+    if field == "b":
+        return attr_proto.b
+    if field == "type":
+        return attr_proto.type
+    if field == "shape":
+        return [dim.size for dim in attr_proto.shape.dim]
+    if field == "tensor":
+        from tensorflow.python.framework import tensor_util
+        import numpy as np
+
+        t = tensor_util.MakeNdarray(attr_proto.tensor)
+        if np.isscalar(t) or t.ndim == 0:
+            return t.item()
+        return t
+    # Fallback to the proto itself for complex types
+    return attr_proto
+
+
 def extract_base_name(input_name: str) -> str:
     """
     Extract base node name from input (strip port and control marker).
@@ -237,6 +266,9 @@ def update_node_inputs(
     # Add hoisted controls if they don't already exist
     if hoisted_controls:
         for ctrl in hoisted_controls:
+            # Prevention: do not add self-control-dependency cycle
+            if ctrl.lstrip("^") == node.name:
+                continue
             if ctrl not in existing_controls:
                 updated_inputs.append(ctrl)
                 existing_controls.add(ctrl)
