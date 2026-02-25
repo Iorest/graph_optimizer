@@ -9,11 +9,11 @@ PROJECT_ROOT="$SCRIPT_DIR"
 # Set PYTHONPATH to include the project root
 export PYTHONPATH="$PROJECT_ROOT:..:$PYTHONPATH"
 
-# Find the best python interpreter
+# Use the local .venv if it exists, otherwise fall back to system python3
 if [ -f "$PROJECT_ROOT/.venv/bin/python3" ]; then
-    PYTHON_EXE="$PROJECT_ROOT/.venv/bin/python3"
+    PYTHON_EXE="${PYTHON_EXE:-$PROJECT_ROOT/.venv/bin/python3}"
 else
-    PYTHON_EXE="python3"
+    PYTHON_EXE="${PYTHON_EXE:-python3}"
 fi
 
 echo "========================================"
@@ -21,27 +21,27 @@ echo "Starting Graph Optimizer Regression Test"
 echo "Using: $PYTHON_EXE"
 echo "========================================"
 
-# 1. Run Framework Tests
-echo -e "\n[1/3] Running Framework Tests..."
-$PYTHON_EXE -m unittest discover "$SCRIPT_DIR/tests/framework" -v
+# 1. Run All Tests (TF & Torch)
+echo -e "\n[1/3] Running Pytest Suite..."
+$PYTHON_EXE -m pytest "$SCRIPT_DIR/tests/" -v
 if [ $? -ne 0 ]; then
-    echo "ERROR: Framework tests failed!"
+    echo "ERROR: Pytest suite failed!"
     exit 1
 fi
 
-# 2. Run Pass Tests
-echo -e "\n[2/3] Running Pass Tests..."
-$PYTHON_EXE -m unittest discover "$SCRIPT_DIR/tests/transforms" -v
-if [ $? -ne 0 ]; then
-    echo "ERROR: Pass tests failed!"
-    exit 1
-fi
-
-# 3. Run Demo
-echo -e "\n[3/3] Running Demo..."
+# 2. Run TF Demo
+echo -e "\n[2/3] Running TensorFlow Demo..."
 $PYTHON_EXE "$SCRIPT_DIR/demos/run_demo.py"
 if [ $? -ne 0 ]; then
-    echo "ERROR: Demo execution failed!"
+    echo "ERROR: TensorFlow Demo execution failed!"
+    exit 1
+fi
+
+# 3. Run Torch Demo
+echo -e "\n[3/3] Running PyTorch FX Demo..."
+$PYTHON_EXE "$SCRIPT_DIR/demos/run_demo_torch.py"
+if [ $? -ne 0 ]; then
+    echo "ERROR: PyTorch FX Demo execution failed!"
     exit 1
 fi
 

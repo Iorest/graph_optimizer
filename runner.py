@@ -2,10 +2,8 @@ import os
 import time
 import datetime
 import logging
-import traceback
-import tensorflow.compat.v1 as tf
 from typing import List, Optional, Dict, Any, Iterable
-from .core import GraphOptimizer, PassRegistry, OptimizationContext
+from .core import OptimizationContext
 from .utils import load_graph, save_graph, logger as custom_logger
 from .utils.reporting import OptimizationReport
 
@@ -21,6 +19,7 @@ class OptimizationPipeline:
         input_graph: Optional[str] = None,
         output_graph: Optional[str] = None,
         graph_def=None,
+        graph_module=None,
         level: int = 1,
         debug: bool = False,
         passes: Optional[List[str]] = None,
@@ -54,13 +53,15 @@ class OptimizationPipeline:
                                                 between each main optimization pass. Default False.
             cleanup_passes (list[str], optional): List of cleanup pass names to run between main passes.
                                                    Default: ['common_subexpression_elimination']
+            graph_module (any, optional): PyTorch FX GraphModule object (triggers PyTorch backend).
 
         Note:
             If both graph_def and input_graph are provided, graph_def takes priority.
-            At least one of graph_def or input_graph must be provided.
+            For PyTorch, pass `graph_module`.
         """
         self.input_graph = input_graph
         self.graph_def = graph_def
+        self.graph_module = graph_module
         self.output_graph = output_graph
         self.level = level
         self.debug = debug
@@ -77,12 +78,10 @@ class OptimizationPipeline:
             "algebraic_simplify",
         ]
 
-        # Automatically protect output nodes from pruning
         for node_name in self.output_nodes:
             if node_name not in self.protected_nodes:
                 self.protected_nodes.append(node_name)
 
-        # Apply config overrides if provided
         if config:
             self._apply_config(config)
 
@@ -185,7 +184,6 @@ class OptimizationPipeline:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             self.debug_dir = f"outputs/run_{timestamp}"
             os.makedirs(self.debug_dir, exist_ok=True)
-            # Redirect log to debug dir if not explicit
             if not self.log_file:
                 self.log_file = os.path.join(self.debug_dir, "optimization.log")
 
@@ -196,165 +194,40 @@ class OptimizationPipeline:
                     "%(asctime)s - [%(levelname)s] - %(name)s - [%(filename)s:%(lineno)d] - %(message)s"
                 )
             )
-            # Attach to root logger or specific logger?
-            # main.py attached to root. Let's attach to root to capture everything.
             logging.getLogger().addHandler(file_handler)
             custom_logger.info(f"Logging to file: {self.log_file}")
 
-    def _resolve_passes(self):
-        """Determines the final list of passes to execute."""
+    def _resolve_explicit_passes(self, prefix: str = "") -> Optional[List[str]]:
+        from .core.passes import PassRegistry
+
         if self.passes:
-            final_passes = list(self.passes)
-            custom_logger.debug(
-                f"Using explicit pass list (no ordering enforced by registry): {final_passes}"
-            )
+            explicit = list(self.passes)
         else:
-            final_passes = PassRegistry.get_passes_by_level(self.level)
-            custom_logger.info(
-                f"Selected passes for Level {self.level}: {final_passes}"
-            )
+            explicit = None  # Let optimizer resolve via opt_level
+
+        if explicit is not None:
+            for p in self.add_passes:
+                if p not in explicit:
+                    explicit.append(p)
+            for p in self.remove_passes:
+                explicit = [n for n in explicit if n != p]
+            return PassRegistry.sort_passes(explicit)
+
+        elif self.add_passes or self.remove_passes:
+            all_passes = PassRegistry.get_passes_by_level(self.level)
+            if prefix:
+                explicit = [p for p in all_passes if p.startswith(prefix)]
+            else:
+                explicit = [p for p in all_passes if not p.startswith("torch_")]
 
             for p in self.add_passes:
-                if p not in final_passes:
-                    final_passes.append(p)
-                    custom_logger.debug(f"Added pass: {p}")
-
+                if p not in explicit:
+                    explicit.append(p)
             for p in self.remove_passes:
-                if p in final_passes:
-                    final_passes.remove(p)
-                    custom_logger.debug(f"Removed pass: {p}")
-                else:
-                    custom_logger.warning(
-                        f"Pass '{p}' in remove_passes was not in the list"
-                    )
+                explicit = [n for n in explicit if n != p]
+            return PassRegistry.sort_passes(explicit)
 
-            # Only re-sort if we're using default Level passes + additions,
-            # this ensures added passes are placed in their proper priority order
-            final_passes = PassRegistry.sort_passes(final_passes)
-
-        # Filter out passes that are already in cleanup_passes (avoid duplicate execution)
-        if self.run_cleanup_between_passes and self.cleanup_passes:
-            filtered_passes = []
-            for p in final_passes:
-                if p in self.cleanup_passes:
-                    custom_logger.debug(
-                        f"Pass '{p}' excluded from main passes (already in cleanup_passes)"
-                    )
-                else:
-                    filtered_passes.append(p)
-            final_passes = filtered_passes
-
-        self.resolved_passes = final_passes
-
-    def _run_single_pass(
-        self,
-        optimizer,
-        context,
-        pass_name,
-        step_num=None,
-        pass_name_override=None,
-        save_debug_suffix=None,
-    ):
-        """Safely executes a single pass with rollback on failure."""
-        if pass_name not in PassRegistry._registered_passes:
-            custom_logger.warning(
-                f"Pass '{pass_name}' not found in registry. Skipping."
-            )
-            return False
-
-        # Create a backup copy of the graph def for potential rollback
-        backup_graph = tf.GraphDef()
-        backup_graph.CopyFrom(optimizer.graph_def)
-
-        try:
-            pass_instance = PassRegistry.get_pass(pass_name)
-            optimizer.clear_transformations()
-
-            # Pass step=None if we are handling debug saving manually via save_debug_suffix
-            pass_step = step_num if not save_debug_suffix else None
-
-            pass_instance.transform(
-                optimizer,
-                step=pass_step,
-                debug_dir=self.debug_dir if not save_debug_suffix else None,
-                context=context,
-                pass_name_override=pass_name_override,
-            )
-
-            # Manual debug graph save for cleanup passes
-            if save_debug_suffix and self.debug_dir:
-                debug_filename = f"{save_debug_suffix}.pb"
-                cleanup_debug_path = os.path.join(self.debug_dir, debug_filename)
-                save_graph(optimizer.graph_def, cleanup_debug_path)
-                custom_logger.debug(f"Saved debug graph to {cleanup_debug_path}")
-
-            return True
-
-        except Exception as e:
-            error_pass_name = pass_name_override or pass_name
-            custom_logger.error(f"Error applying pass '{error_pass_name}': {e}")
-            custom_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
-            custom_logger.warning(
-                f"Rolling back graph state before pass '{error_pass_name}'..."
-            )
-            optimizer.load_state(backup_graph)
-            return False
-
-    def _run_cleanup_passes(self, optimizer, context, step_num, is_final=False):
-        """Run configured cleanup passes after a main optimization pass."""
-        if not self.cleanup_passes:
-            return
-
-        context_str = (
-            "final"
-            if is_final
-            else ("initial" if step_num == 0 else f"after step {step_num}")
-        )
-
-        for pass_name in self.cleanup_passes:
-            try:
-                pass_instance = PassRegistry.get_pass(pass_name)
-            except ValueError:
-                custom_logger.warning(
-                    f"Pass '{pass_name}' not found in registry. Skipping."
-                )
-                continue
-
-            custom_logger.debug(f"Running cleanup pass '{pass_name}' {context_str}...")
-
-            # Determine debug file suffix and stats name
-            if is_final:
-                debug_suffix = f"{step_num:02d}_{pass_name}_final_cleanup"
-                stats_name = f"{pass_instance.name} (cleanup@final)"
-            elif step_num == 0:
-                debug_suffix = f"00_{pass_name}_initial_cleanup"
-                stats_name = f"{pass_instance.name} (cleanup@init)"
-            else:
-                debug_suffix = f"{step_num:02d}_{pass_name}_cleanup"
-                stats_name = f"{pass_instance.name} (cleanup@{step_num})"
-
-            self._run_single_pass(
-                optimizer,
-                context,
-                pass_name,
-                pass_name_override=stats_name,
-                save_debug_suffix=debug_suffix,
-            )
-
-    def _execute_main_passes(self, optimizer, context):
-        """Execute all main optimization passes sequentially."""
-        for i, pass_name in enumerate(self.resolved_passes):
-            success = self._run_single_pass(
-                optimizer, context, pass_name, step_num=i + 1
-            )
-
-            # Skip cleanup if pass failed (as graph was rolled back anyway),
-            # or if this is the last pass (handled by final cleanup)
-            is_last_pass = i == len(self.resolved_passes) - 1
-            if success and self.run_cleanup_between_passes and not is_last_pass:
-                self._run_cleanup_passes(
-                    optimizer, context, step_num=i + 1, is_final=False
-                )
+        return None
 
     def _load_graph(self):
         """Loads or returns the initial graph definition."""
@@ -371,36 +244,53 @@ class OptimizationPipeline:
         else:
             raise ValueError("Either graph_def or input_graph must be provided.")
 
-    def run(self):
-        """Executes the optimization pipeline."""
-        self._setup_logging_and_debug()
-        self._resolve_passes()
-        graph_def = self._load_graph()
-
-        custom_logger.info("Initializing optimizer...")
-        optimizer = GraphOptimizer(graph_def)
-        initial_node_count = len(optimizer.nodes)
-
-        if self.debug_dir:
-            save_graph(
-                optimizer.graph_def, os.path.join(self.debug_dir, "00_initial.pb")
-            )
-
-        custom_logger.info(
-            f"Applying {len(self.resolved_passes)} passes: {self.resolved_passes}"
+    def _detect_backend(self) -> str:
+        """Determines proper backend from provided instances."""
+        if getattr(self, "graph_module", None) is not None:
+            return "torch"
+        if (
+            getattr(self, "graph_def", None) is not None
+            or getattr(self, "input_graph", None) is not None
+        ):
+            return "tensorflow"
+        raise ValueError(
+            "No valid input provided. Must supply graph_def, input_graph, or graph_module."
         )
 
-        if self.run_cleanup_between_passes:
-            custom_logger.debug(
-                f"Cleanup passes between main passes: {self.cleanup_passes}"
+    def run(self):
+        """Executes the uniform optimization pipeline."""
+        self._setup_logging_and_debug()
+        backend = self._detect_backend()
+
+        if backend == "torch":
+            custom_logger.info("Initializing PyTorch TorchOptimizer...")
+            from .core.torch import TorchOptimizer
+
+            explicit_passes = self._resolve_explicit_passes(prefix="torch_")
+            optimizer = TorchOptimizer(
+                self.graph_module,
+                passes=explicit_passes,
+                opt_level=self.level,
             )
+        else:
+            custom_logger.info("Initializing TensorFlow TFGraphOptimizer...")
+            from .core.tensorflow import TFGraphOptimizer
+
+            graph_def = self._load_graph()
+            explicit_passes = self._resolve_explicit_passes(prefix="")
+            optimizer = TFGraphOptimizer(
+                graph_def,
+                passes=explicit_passes,
+                opt_level=self.level,
+            )
+
+        initial_node_count = optimizer.node_count
 
         if self.protected_nodes:
             custom_logger.info(
                 f"Protected nodes ({len(self.protected_nodes)}): {self.protected_nodes}"
             )
 
-        # Create global context for all passes
         context = OptimizationContext(
             protected_nodes=self.protected_nodes,
             auto_cleanup=True,
@@ -408,52 +298,40 @@ class OptimizationPipeline:
         )
 
         start_time = time.time()
-        try:
-            # Run initial cleanup passes before all main passes (if enabled)
-            if self.run_cleanup_between_passes and self.cleanup_passes:
-                custom_logger.debug(
-                    f"Running initial cleanup passes: {self.cleanup_passes}"
-                )
-                self._run_cleanup_passes(optimizer, context, step_num=0, is_final=False)
+        custom_logger.info(
+            f"Running pipeline (backend={backend}, opt_level={self.level})..."
+        )
 
-            # Execute all main optimization passes
-            self._execute_main_passes(optimizer, context)
+        optimizer.optimize(
+            context=context,
+            debug_dir=self.debug_dir,
+            run_cleanup_between_passes=self.run_cleanup_between_passes,
+            cleanup_passes=self.cleanup_passes,
+        )
 
-            # Run final cleanup passes after all main passes are done
-            if self.run_cleanup_between_passes and self.cleanup_passes:
-                custom_logger.debug(
-                    f"Running final cleanup passes: {self.cleanup_passes}"
-                )
-                self._run_cleanup_passes(
-                    optimizer,
-                    context,
-                    step_num=len(self.resolved_passes) + 1,
-                    is_final=True,
-                )
-        finally:
-            total_time = time.time() - start_time
-            final_node_count = len(optimizer.nodes)
+        total_time = time.time() - start_time
+        final_node_count = optimizer.node_count
 
+        if backend == "tensorflow":
             if self.output_graph:
                 custom_logger.info(f"Saving optimized graph to {self.output_graph}")
                 save_graph(optimizer.graph_def, self.output_graph)
-
             if self.debug_dir:
                 save_graph(
                     optimizer.graph_def, os.path.join(self.debug_dir, "final.pb")
                 )
 
-            # Log final summary
-            self._log_final_summary(
-                context, initial_node_count, final_node_count, total_time
-            )
+        self._log_final_summary(
+            context, initial_node_count, final_node_count, total_time
+        )
 
         return OptimizationReport(
             initial_nodes=initial_node_count,
             final_nodes=final_node_count,
             total_time=total_time,
             pass_stats=context._pass_stats,
-            graph_def=optimizer.graph_def,
+            graph_def=getattr(optimizer, "graph_def", None),
+            graph_module=getattr(optimizer, "graph_module", None),
         )
 
     def _log_final_summary(
@@ -467,7 +345,6 @@ class OptimizationPipeline:
         custom_logger.info("OPTIMIZATION SUMMARY")
         custom_logger.info("=" * 70)
 
-        # Per-pass statistics
         if context._pass_stats:
             custom_logger.info("")
             custom_logger.info("Per-Pass Statistics:")
@@ -500,7 +377,6 @@ class OptimizationPipeline:
 
             custom_logger.info("-" * 70)
 
-        # Overall statistics
         custom_logger.info("")
         custom_logger.info("Overall:")
         custom_logger.info(f"  Total passes executed: {len(context._pass_stats)}")

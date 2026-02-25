@@ -1,5 +1,6 @@
-from .core import (
-    GraphOptimizer,
+from .core import PassRegistry
+from .core.tensorflow import (
+    TFGraphOptimizer,
     RewriteResult,
     OpPattern,
     WildcardPattern,
@@ -11,7 +12,6 @@ from .core import (
     ConstValue,
     Attr,
     Shape,
-    PassRegistry,
 )
 from .utils import (
     create_node,
@@ -26,7 +26,7 @@ from .utils.logger import set_log_level, DEBUG, INFO, WARNING, ERROR
 from . import transforms
 
 __all__ = [
-    "GraphOptimizer",
+    "TFGraphOptimizer",
     "RewriteResult",
     "OpPattern",
     "WildcardPattern",

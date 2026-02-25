@@ -2,7 +2,7 @@
 Framework Tests - 核心框架测试模块
 ===================================
 
-测试 GraphOptimizer 核心引擎的各项功能：
+测试 TFGraphOptimizer 核心引擎的各项功能：
 
 模块列表：
 - test_core.py              : 基础功能（节点查找、交换律匹配、Variadic 匹配、控制依赖）

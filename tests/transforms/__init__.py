@@ -1,17 +1,17 @@
 """
-Transform Tests - 优化 Pass 测试模块
-=====================================
+Transform Tests
+===============
+Organized by backend, mirroring the source layout::
 
-按照 transforms 目录结构组织的测试：
-
-tests/transforms/
-├── scalar/              # 标量优化测试
-│   ├── test_identity_elim.py   # Identity 消除测试
-│   └── test_cse.py             # CSE 测试
-│
-├── combine/             # 组合优化测试
-│   └── test_concat_combine.py  # Concat 融合测试
-│
-└── vectorize/           # 向量化优化测试
-    └── test_pack_vectorize.py  # Pack 上浮测试（暂无）
+    tests/transforms/
+    ├── tensorflow/
+    │   ├── scalar/        # AlgebraicSimplify, ConstantFold, CSE
+    │   ├── combine/       # ConcatCombine
+    │   └── vectorize/     # PackVectorize
+    └── torch/
+        ├── test_algebraic_simplify.py
+        ├── test_constant_fold.py
+        ├── test_cse.py
+        ├── test_matmul_fuse.py
+        └── test_reshape_eliminate.py
 """

@@ -13,13 +13,17 @@ class OptimizationReport:
         final_nodes: int,
         total_time: float,
         pass_stats: Dict[str, Any],
-        graph_def: Any = None,
+        graph_def: Any = None,  # TF backend — GraphDef
+        graph_module: Any = None,  # Torch backend — fx.GraphModule
     ):
         self.initial_nodes = initial_nodes
         self.final_nodes = final_nodes
         self.total_time = total_time
         self.pass_stats = pass_stats
-        self.graph_def = graph_def
+        # Unified graph reference (whichever backend set it)
+        self.graph = graph_module if graph_module is not None else graph_def
+        self.graph_def = self.graph  # TF-style alias
+        self.graph_module = self.graph  # Torch-style alias
         self.nodes_removed = initial_nodes - final_nodes
         self.reduction_pct = (
             (self.nodes_removed / initial_nodes * 100) if initial_nodes > 0 else 0

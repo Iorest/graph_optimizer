@@ -2,7 +2,7 @@
 Graph manipulation utility functions.
 
 This module provides stateless utility functions for common graph operations,
-including I/O and analysis, extracted from GraphOptimizer to improve modularity
+including I/O and analysis, extracted from TFGraphOptimizer to improve modularity
 and reusability.
 """
 
@@ -339,14 +339,20 @@ def prune_dead_nodes(
         if node.op == "Placeholder" or node.name in protected_nodes:
             continue
 
-        # Always prune unreferenced Const nodes
-        if node.op == "Const" and refs_after[node.name] == 0:
-            dead_nodes.add(node.name)
-            continue
-
-        # Prune nodes that became dead (had refs before, now don't)
-        if refs_before and node.name in refs_before:
-            if refs_before[node.name] > 0 and refs_after[node.name] == 0:
+        if refs_before is None:
+            # Full-cleanup mode (no scope): prune every zero-ref node,
+            # including Const and non-Const alike.
+            if refs_after[node.name] == 0:
+                dead_nodes.add(node.name)
+        else:
+            # Scoped mode: only prune nodes that *this pass* is responsible for.
+            # Always prune unreferenced Const nodes regardless of refs_before.
+            if node.op == "Const" and refs_after[node.name] == 0:
+                dead_nodes.add(node.name)
+                continue
+            # Prune non-Const nodes that became dead (whether they had refs
+            # before or not, as long as the pass tracked them in refs_before).
+            if node.name in refs_before and refs_after[node.name] == 0:
                 dead_nodes.add(node.name)
 
     if dead_nodes:

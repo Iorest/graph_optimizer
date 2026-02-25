@@ -10,7 +10,7 @@ ERROR = logging.ERROR
 
 
 # Singleton logger setup
-def get_logger(name="GraphOptimizer"):
+def get_logger(name="TFGraphOptimizer"):
     logger = logging.getLogger(name)
     if not logger.handlers:
         handler = logging.StreamHandler()
@@ -25,9 +25,15 @@ def get_logger(name="GraphOptimizer"):
 
 logger = get_logger()
 
+# Torch-side logger — same formatter, different name
+# Used by core/torch/torch_optimizer.py as logging.getLogger("GraphOptimizer.torch")
+_torch_logger = get_logger("GraphOptimizer.torch")
+
 
 def set_log_level(level):
+    """Set log level for both TF and Torch loggers."""
     logger.setLevel(level)
+    _torch_logger.setLevel(level)
 
 
 def trace_transformation(func):
@@ -38,15 +44,21 @@ def trace_transformation(func):
         start_time = time.time()
         result = func(match, optimizer, *args, **kwargs)
         duration = (time.time() - start_time) * 1000
-        
+
         # Only log when optimization actually happened (result is not None)
         if result:
             # Handle both list format and RewriteResult format
-            node_count = len(result.new_nodes) if hasattr(result, 'new_nodes') else len(result)
+            node_count = (
+                len(result.new_nodes) if hasattr(result, "new_nodes") else len(result)
+            )
             # Get anchor node name from match context
-            anchor_name = next(iter(match.all_matched_nodes), "unknown") if match.all_matched_nodes else "unknown"
+            anchor_name = (
+                next(iter(match.all_matched_nodes), "unknown")
+                if match.all_matched_nodes
+                else "unknown"
+            )
             # Get pass name from optimizer
-            pass_name = getattr(optimizer, 'current_pass_name', None)
+            pass_name = getattr(optimizer, "current_pass_name", None)
             prefix = f"[{pass_name}] " if pass_name else ""
             logger.info(
                 f"{prefix}Rewriter {func.__name__} matched at {anchor_name}, generated {node_count} nodes ({duration:.2f}ms)"
@@ -68,7 +80,9 @@ def log_optimization(func):
         prefix = f"[{pass_name}] " if pass_name else ""
         # 使用 graph_def.node 获取真实节点数，避免 self.nodes 未同步的问题
         original_node_count = len(self.graph_def.node)
-        logger.info(f"{prefix}Starting graph optimization pass... ({original_node_count} nodes)")
+        logger.info(
+            f"{prefix}Starting graph optimization pass... ({original_node_count} nodes)"
+        )
         start_time = time.time()
 
         result_graph = func(self, *args, **kwargs)
@@ -91,9 +105,11 @@ def log_match(func):
     def wrapper(self, node, optimizer, context=None):
         res = func(self, node, optimizer, context)
         if res:
-            pass_name = getattr(optimizer, 'current_pass_name', None)
+            pass_name = getattr(optimizer, "current_pass_name", None)
             prefix = f"[{pass_name}] " if pass_name else ""
-            logger.debug(f"{prefix}Matched pattern on node: {node.name} (Op: {node.op})")
+            logger.debug(
+                f"{prefix}Matched pattern on node: {node.name} (Op: {node.op})"
+            )
         return res
 
     return wrapper

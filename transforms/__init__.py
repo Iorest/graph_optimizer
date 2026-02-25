@@ -24,29 +24,29 @@ Pass 执行顺序建议：
 """
 
 # Scalar transforms
-from .scalar import (
+from .tensorflow.scalar import (
     CSEPass,
     ConstantFoldPass,
     AlgebraicSimplifyPass,
 )
 
 # Combine transforms
-from .combine import (
+from .tensorflow.combine import (
     ConcatCombinePass,
 )
 
 # Vectorize transforms
-from .vectorize import (
+from .tensorflow.vectorize import (
     PackVectorizePass,
 )
 
 __all__ = [
     # Scalar
-    'CSEPass',
-    'ConstantFoldPass',
-    'AlgebraicSimplifyPass',
+    "CSEPass",
+    "ConstantFoldPass",
+    "AlgebraicSimplifyPass",
     # Combine
-    'ConcatCombinePass',
+    "ConcatCombinePass",
     # Vectorize
-    'PackVectorizePass',
+    "PackVectorizePass",
 ]
