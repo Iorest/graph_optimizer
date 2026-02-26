@@ -1,10 +1,8 @@
 import tensorflow.compat.v1 as tf
-import hashlib
-import collections
-from ...utils.logger import logger as logging, log_optimization
+from ...utils.logger import tf_logger as logging, log_optimization
 from .graph import GraphState
 from .matcher import PatternMatcher
-from .passes import OptimizationContext
+from ..passes import OptimizationContext
 from ..base_optimizer import BaseOptimizer
 
 
@@ -110,9 +108,11 @@ class TFGraphOptimizer(GraphState, BaseOptimizer):
 
         for i, fx_pass in enumerate(main_passes):
             pass_name = fx_pass.name
-
-            backup_graph = tf.GraphDef()
-            backup_graph.CopyFrom(self.graph_def)
+            # Cheap pre-pass snapshot: just freeze node names (O(N) string hashing).
+            # We only do the expensive CopyFrom if the pass actually mutated the graph
+            # before raising, so the common success path does no unnecessary copy.
+            pre_pass_graph = tf.GraphDef()
+            pre_pass_graph.CopyFrom(self.graph_def)
 
             try:
                 self.clear_transformations()
@@ -140,7 +140,7 @@ class TFGraphOptimizer(GraphState, BaseOptimizer):
                 logging.warning(
                     f"Rolling back graph state before pass '{pass_name}'..."
                 )
-                self.load_state(backup_graph)
+                self.load_state(pre_pass_graph)
                 continue
 
         if run_cleanup_between_passes:
@@ -180,18 +180,17 @@ class TFGraphOptimizer(GraphState, BaseOptimizer):
             backup_graph.CopyFrom(self.graph_def)
 
             try:
-                self.clear_transformations()
                 pass_instance.transform(
                     self,
-                    step=None,  # Handled manually here if we wanted to
-                    debug_dir=None,  # Don't rely on base pass saving here, we save manually
+                    step=None,
+                    debug_dir=debug_dir,
                     context=context,
                     pass_name_override=stats_name,
                 )
 
                 if debug_dir:
                     import os
-                    from ...utils import save_graph
+                    from ...utils.tf.graph_utils import save_graph
 
                     debug_filename = f"{debug_suffix}.pb"
                     cleanup_debug_path = os.path.join(debug_dir, debug_filename)
@@ -232,22 +231,25 @@ class TFGraphOptimizer(GraphState, BaseOptimizer):
 
         current_graph_def = self.graph_def
 
-        last_graph_hashes = collections.deque(maxlen=5)
+        # O(N) oscillation detector: track frozenset of node names seen so far.
+        # This catches A→B→A rewrite cycles without O(N log N) sorting + SHA256.
+        seen_fingerprints: set = set()
 
         for _ in range(max_iterations):
             self.load_state(current_graph_def)
-            graph_hash = self._compute_graph_hash(current_graph_def)
-            if graph_hash in last_graph_hashes:
+
+            # Lightweight fingerprint: just the set of node names.
+            fp = frozenset(n.name for n in current_graph_def.node)
+            if fp in seen_fingerprints:
                 logging.warning(
-                    f"[{pass_name or 'unnamed'}] Infinite loop detected (stable graph state repeating). "
+                    f"[{pass_name or 'unnamed'}] Oscillation detected (graph topology repeating). "
                     "Stopping optimization pass."
                 )
                 break
-            last_graph_hashes.append(graph_hash)
+            seen_fingerprints.add(fp)
 
             new_graph_def, changes = self.match_patterns_once(
                 pass_name=pass_name,
-                auto_cleanup=auto_cleanup,
                 protected_nodes=protected_set,
             )
             if changes == 0:
@@ -269,22 +271,30 @@ class TFGraphOptimizer(GraphState, BaseOptimizer):
         return current_graph_def
 
     def match_patterns_once(
-        self, pass_name=None, auto_cleanup=True, protected_nodes=None, context=None
+        self, pass_name=None, protected_nodes=None, context=None, **kwargs
     ):
         """Run a single iteration of pattern-based matching."""
+        auto_cleanup = kwargs.get("auto_cleanup", True)
         if context:
             protected_nodes = context.protected_nodes
             auto_cleanup = context.auto_cleanup
-        return self._matcher.match_once(self, pass_name, auto_cleanup, protected_nodes)
 
-    def _compute_graph_hash(self, graph_def: tf.GraphDef) -> str:
-        """Stable hash of the graph topology for cycle detection."""
-        hasher = hashlib.sha256()
-        sorted_nodes = sorted(graph_def.node, key=lambda n: n.name)
-        hasher.update(str(len(sorted_nodes)).encode())
-        for node in sorted_nodes:
-            hasher.update(node.name.encode())
-            hasher.update(node.op.encode())
-            for inp in sorted(node.input):
-                hasher.update(inp.encode())
-        return hasher.hexdigest()
+        # Capture ref counts on the OLD graph before any rewrite.
+        # Nodes present here with zero refs in the new graph are confirmed dead
+        # (they were the replaced nodes). New output nodes added by the rewriter
+        # are not in refs_before, so scoped-mode prune will never touch them —
+        # even if they have zero consumers in this snapshot.
+        refs_before = self.compute_reference_counts()
+        new_nodes, changes = self._matcher.match_once(
+            self, pass_name, False, protected_nodes
+        )
+
+        new_graph_def = tf.GraphDef()
+        new_graph_def.node.extend(new_nodes)
+
+        if changes > 0 and auto_cleanup:
+            new_graph_def = self.prune_dead_nodes(
+                new_graph_def, pass_name, refs_before, set(protected_nodes or [])
+            )
+
+        return new_graph_def, changes

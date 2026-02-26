@@ -4,7 +4,7 @@ import pytest
 import tensorflow.compat.v1 as tf
 from tensorflow.python.framework import tensor_util
 from graph_optimizer.core.tensorflow import TFGraphOptimizer
-from graph_optimizer.utils import create_node, make_output_shapes_attr
+from graph_optimizer.utils.tf.graph_utils import create_node, make_output_shapes_attr
 from graph_optimizer.transforms.tensorflow.vectorize import PackVectorizePass
 from tensorflow.core.framework import attr_value_pb2
 

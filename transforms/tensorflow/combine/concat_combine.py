@@ -111,11 +111,11 @@ Space: O(M)
 
 from ....core import PassRegistry
 from ....core.tensorflow import Op, Any, Variadic, PatternRewritePass
-from ....utils import create_node
-from ....utils.logger import logger as logging
+from ....utils.tf.graph_utils import create_node, extract_base_name
+from ....utils.logger import tf_logger as logging
 
 
-@PassRegistry.register("concat_combine", opt_level=3, priority=40)
+@PassRegistry.register("concat_combine", backend="tensorflow", opt_level=3, priority=40)
 class ConcatCombinePass(PatternRewritePass):
     """
     Fuses multi-level ConcatV2 operations with the same axis.
@@ -167,7 +167,7 @@ class ConcatCombinePass(PatternRewritePass):
         changed = False
 
         for input_name in root_values_inputs:
-            base_name = self.clean_input_name(input_name)
+            base_name = extract_base_name(input_name)
             should_fuse = False
 
             if base_name in optimizer.nodes:
@@ -187,7 +187,7 @@ class ConcatCombinePass(PatternRewritePass):
                     ]
 
                     if len(inner_data_inputs) >= 2:
-                        inner_axis_name = self.clean_input_name(inner_data_inputs[-1])
+                        inner_axis_name = extract_base_name(inner_data_inputs[-1])
                         inner_axis_node = optimizer.nodes.get(inner_axis_name)
 
                         if inner_axis_node and inner_axis_node.op == "Const":

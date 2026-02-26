@@ -4,7 +4,7 @@ PyTorch FX Common Subexpression Elimination (CSE) Pass
 Identifies and deduplicates `call_function` nodes that compute the same value,
 replacing all consumers of the duplicate with the canonical node.
 
-`call_method` nodes are intentionally excluded: their target is a plain string
+`call_method` nodes are currently excluded: their target is a plain string
 (e.g. ``"contiguous"``), which does not capture the receiver's device/dtype.
 Two calls like ``cpu_tensor.contiguous()`` and ``cuda_tensor.contiguous()`` would
 share the same signature and be incorrectly merged.
@@ -37,7 +37,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.fx as fx
 
-from graph_optimizer.core.base_pass import BaseOptimizationPass
+from graph_optimizer.core.torch.torch_passes import TorchBasePass
 from graph_optimizer.core.passes import PassRegistry
 
 
@@ -86,7 +86,20 @@ def _make_sig(node: fx.Node, sig_cache: Dict[fx.Node, _Sig]) -> Optional[_Sig]:
                 # Depends on a node we couldn't fingerprint (e.g. placeholder)
                 return None
             resolved_args.append(a_sig)
-        elif isinstance(a, (int, float, bool, str, type(None))):
+        elif isinstance(
+            a,
+            (
+                int,
+                float,
+                bool,
+                str,
+                type(None),
+                torch.device,
+                torch.dtype,
+                torch.layout,
+                torch.memory_format,
+            ),
+        ):
             resolved_args.append(a)
         else:
             # Unknown argument type — be conservative
@@ -100,7 +113,20 @@ def _make_sig(node: fx.Node, sig_cache: Dict[fx.Node, _Sig]) -> Optional[_Sig]:
             if v_sig is None:
                 return None
             resolved_kwargs[k] = v_sig
-        elif isinstance(v, (int, float, bool, str, type(None))):
+        elif isinstance(
+            v,
+            (
+                int,
+                float,
+                bool,
+                str,
+                type(None),
+                torch.device,
+                torch.dtype,
+                torch.layout,
+                torch.memory_format,
+            ),
+        ):
             resolved_kwargs[k] = v
         else:
             return None
@@ -113,8 +139,8 @@ def _make_sig(node: fx.Node, sig_cache: Dict[fx.Node, _Sig]) -> Optional[_Sig]:
     )
 
 
-@PassRegistry.register("torch_cse", opt_level=1, priority=20)
-class TorchCSEPass(BaseOptimizationPass):
+@PassRegistry.register("torch_cse", backend="torch", opt_level=1, priority=20)
+class TorchCSEPass(TorchBasePass):
     """
     Common Subexpression Elimination for PyTorch FX graphs.
 
@@ -122,14 +148,10 @@ class TorchCSEPass(BaseOptimizationPass):
     the same value and replaces all their consumers with the canonical node.
     """
 
-    @property
-    def name(self) -> str:
-        return self._name
-
     def __init__(self):
-        self._name = "cse"
+        super().__init__(name="cse")
 
-    def apply(self, graph_module: fx.GraphModule) -> bool:
+    def transform(self, graph_module: fx.GraphModule) -> bool:
         """
         Run one pass of CSE on the graph.
 

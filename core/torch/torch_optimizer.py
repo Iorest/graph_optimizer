@@ -17,6 +17,7 @@ import traceback
 from typing import Any, List, Optional
 
 from ..base_optimizer import BaseOptimizer
+from ...utils.logger import log_optimization
 from ..passes import OptimizationContext, PassRegistry
 
 logger = logging.getLogger("GraphOptimizer.torch")
@@ -36,8 +37,9 @@ def _ensure_torch_passes_registered() -> None:
 def _default_pass_names(opt_level: int) -> List[str]:
     """Return sorted Torch pass names active at the given opt_level."""
     _ensure_torch_passes_registered()
-    all_names = PassRegistry.get_passes_by_level(opt_level)
-    return [n for n in all_names if n.startswith("torch_")]
+    from ..passes import PassRegistry
+
+    return PassRegistry.get_passes_by_backend("torch", opt_level)
 
 
 def _snapshot(graph_module: Any) -> dict:
@@ -139,6 +141,7 @@ class TorchOptimizer(BaseOptimizer):
     def node_count(self) -> int:
         return len(self.graph_module.graph.nodes)
 
+    @log_optimization
     def optimize(
         self,
         max_iterations: int = 5,
@@ -208,7 +211,7 @@ class TorchOptimizer(BaseOptimizer):
                     context.begin_iteration()
 
                 try:
-                    pass_changed = fx_pass.apply(self.graph_module)
+                    pass_changed = fx_pass.apply(self)
                 except Exception as exc:
                     logger.error(f"[{pass_name}] raised an exception: {exc}")
                     logger.debug(f"[{pass_name}] traceback:\n{traceback.format_exc()}")

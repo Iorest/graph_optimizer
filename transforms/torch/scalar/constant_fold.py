@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.fx as fx
 
-from graph_optimizer.core.base_pass import BaseOptimizationPass
+from graph_optimizer.core.torch.torch_passes import TorchBasePass
 from graph_optimizer.core.passes import PassRegistry
 
 
@@ -61,32 +61,27 @@ _UNARY_OPS: Dict[Any, Any] = {
 }
 
 
-@PassRegistry.register("torch_constant_fold", opt_level=1, priority=5)
-class TorchConstantFoldPass(BaseOptimizationPass):
+@PassRegistry.register("torch_constant_fold", backend="torch", opt_level=1, priority=5)
+class TorchConstantFoldPass(TorchBasePass):
     """
-    Folds constant subgraphs in a PyTorch FX GraphModule.
+    Fuses operations containing only scalar constant inputs into single constants.
     """
-
-    @property
-    def name(self) -> str:
-        return self._name
 
     def __init__(self):
-        self._name = "constant_fold"
+        super().__init__(name="constant_fold")
         self._attr_counter = 0
 
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
-    def apply(self, graph_module: fx.GraphModule) -> bool:
+    def transform(self, graph_module: fx.GraphModule) -> bool:
         """
         Walk the graph once, fold any fully-constant subgraphs.
 
         Returns:
             True if at least one node was folded.
         """
-        self._attr_counter = 0
         known: Dict[fx.Node, Any] = {}  # node -> concrete Python/tensor value
 
         # Seed: collect get_attr nodes that refer to scalar/tensor constants

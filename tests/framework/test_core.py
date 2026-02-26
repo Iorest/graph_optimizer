@@ -7,7 +7,7 @@ control dependency handling, and graph pruning.
 
 import tensorflow.compat.v1 as tf
 from graph_optimizer.core.tensorflow import TFGraphOptimizer, Op
-from graph_optimizer.utils import create_node
+from graph_optimizer.utils.tf.graph_utils import create_node
 
 tf.disable_v2_behavior()
 

@@ -26,7 +26,7 @@ def pass_():
 def test_fold_add_scalars(pass_):
     class M(torch.nn.Module):
         def forward(self, x):
-            return x + operator.add(3, 4)
+            return x + torch.add(torch.tensor(3), torch.tensor(4))
 
     gm = fx.symbolic_trace(M())
     changed = pass_.apply(gm)
@@ -38,7 +38,7 @@ def test_fold_add_scalars(pass_):
 def test_fold_mul_scalars(pass_):
     class M(torch.nn.Module):
         def forward(self, x):
-            return x + operator.mul(2.0, 3.0)
+            return x + torch.mul(torch.tensor(2.0), torch.tensor(3.0))
 
     gm = fx.symbolic_trace(M())
     changed = pass_.apply(gm)
@@ -83,7 +83,7 @@ def test_identity_graph(pass_):
 def test_idempotent(pass_):
     class M(torch.nn.Module):
         def forward(self, x):
-            return x + operator.add(2, 3)
+            return x + torch.add(torch.tensor(2), torch.tensor(3))
 
     gm = fx.symbolic_trace(M())
     pass_.apply(gm)

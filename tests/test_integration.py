@@ -14,7 +14,7 @@ import pytest
 import tensorflow.compat.v1 as tf
 from graph_optimizer.runner import OptimizationPipeline
 from graph_optimizer.core.tensorflow import TFGraphOptimizer
-from graph_optimizer.utils import (
+from graph_optimizer.utils.tf.graph_utils import (
     create_node,
     create_const_node,
     make_output_shapes_attr,

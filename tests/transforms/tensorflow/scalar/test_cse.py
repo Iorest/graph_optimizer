@@ -4,7 +4,7 @@ import pytest
 import tensorflow.compat.v1 as tf
 from graph_optimizer.core.tensorflow import TFGraphOptimizer
 from graph_optimizer.transforms.tensorflow.scalar import CSEPass
-from graph_optimizer.utils import create_node
+from graph_optimizer.utils.tf.graph_utils import create_node
 from tensorflow.core.framework import attr_value_pb2
 
 tf.disable_v2_behavior()

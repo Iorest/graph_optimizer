@@ -8,7 +8,7 @@ default pass name resolution, and debug dump.
 import pytest
 import torch
 import torch.fx as fx
-from graph_optimizer.core.base_pass import BaseOptimizationPass
+from graph_optimizer.core.passes import BaseOptimizationPass
 from graph_optimizer.core.torch.torch_optimizer import (
     TorchOptimizer,
     _snapshot,

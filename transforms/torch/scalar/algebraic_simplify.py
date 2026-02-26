@@ -23,26 +23,20 @@ import operator
 import pytest  # noqa: F401 importorskip pattern
 import torch
 import torch.fx as fx
-from graph_optimizer.core.base_pass import BaseOptimizationPass
+from graph_optimizer.core.torch.torch_passes import TorchBasePass
 from graph_optimizer.core.passes import PassRegistry
 
 
-@PassRegistry.register("torch_algebraic_simplify", opt_level=1, priority=7)
-class TorchAlgebraicSimplifyPass(BaseOptimizationPass):
-    """Simplifies algebraic identities in a PyTorch FX graph."""
-
-    @property
-    def name(self) -> str:
-        return self._name
+@PassRegistry.register("torch_algebraic_simplify", backend='torch', opt_level=1, priority=7)
+class TorchAlgebraicSimplifyPass(TorchBasePass):
+    """
+    PyTorch FX pass for simplifying basic algebraic operations.
+    """
 
     def __init__(self):
-        self._name = "algebraic_simplify"
+        super().__init__(name="algebraic_simplify")
 
-    # ------------------------------------------------------------------
-    # Public entry point
-    # ------------------------------------------------------------------
-
-    def apply(self, graph_module: fx.GraphModule) -> bool:
+    def transform(self, graph_module: fx.GraphModule) -> bool:
         """
         Applies algebraic simplifications.
 

@@ -5,7 +5,7 @@ import tensorflow.compat.v1 as tf
 from graph_optimizer.transforms.tensorflow.scalar.algebraic_simplify import (
     AlgebraicSimplifyPass,
 )
-from graph_optimizer.utils.graph_utils import create_node, create_const_node
+from graph_optimizer.utils.tf.graph_utils import create_node, create_const_node
 from ..conftest import make_graph
 
 # ---------------------------------------------------------------------------

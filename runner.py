@@ -4,7 +4,8 @@ import datetime
 import logging
 from typing import List, Optional, Dict, Any, Iterable
 from .core import OptimizationContext
-from .utils import load_graph, save_graph, logger as custom_logger
+from .utils.tf.graph_utils import load_graph, save_graph
+from .utils import core_logger as custom_logger
 from .utils.reporting import OptimizationReport
 
 
@@ -197,7 +198,7 @@ class OptimizationPipeline:
             logging.getLogger().addHandler(file_handler)
             custom_logger.info(f"Logging to file: {self.log_file}")
 
-    def _resolve_explicit_passes(self, prefix: str = "") -> Optional[List[str]]:
+    def _resolve_explicit_passes(self, backend: str) -> Optional[List[str]]:
         from .core.passes import PassRegistry
 
         if self.passes:
@@ -214,11 +215,7 @@ class OptimizationPipeline:
             return PassRegistry.sort_passes(explicit)
 
         elif self.add_passes or self.remove_passes:
-            all_passes = PassRegistry.get_passes_by_level(self.level)
-            if prefix:
-                explicit = [p for p in all_passes if p.startswith(prefix)]
-            else:
-                explicit = [p for p in all_passes if not p.startswith("torch_")]
+            explicit = PassRegistry.get_passes_by_backend(backend, self.level)
 
             for p in self.add_passes:
                 if p not in explicit:
@@ -266,7 +263,7 @@ class OptimizationPipeline:
             custom_logger.info("Initializing PyTorch TorchOptimizer...")
             from .core.torch import TorchOptimizer
 
-            explicit_passes = self._resolve_explicit_passes(prefix="torch_")
+            explicit_passes = self._resolve_explicit_passes(backend="torch")
             optimizer = TorchOptimizer(
                 self.graph_module,
                 passes=explicit_passes,
@@ -277,7 +274,7 @@ class OptimizationPipeline:
             from .core.tensorflow import TFGraphOptimizer
 
             graph_def = self._load_graph()
-            explicit_passes = self._resolve_explicit_passes(prefix="")
+            explicit_passes = self._resolve_explicit_passes(backend="tensorflow")
             optimizer = TFGraphOptimizer(
                 graph_def,
                 passes=explicit_passes,

@@ -9,11 +9,11 @@ if __name__ == "__main__":
 
 try:
     from . import transforms  # Register all passes
-    from .utils.logger import logger as custom_logger
+    from .utils.logger import core_logger as custom_logger
 except ImportError:
     # Direct execution fallback
     import graph_optimizer.transforms as transforms
-    from graph_optimizer.utils.logger import logger as custom_logger
+    from graph_optimizer.utils.logger import core_logger as custom_logger
 
 # Prevent unused import warning
 _ = transforms

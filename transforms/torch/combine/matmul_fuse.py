@@ -34,7 +34,7 @@ from typing import Optional
 import torch
 import torch.fx as fx
 
-from graph_optimizer.core.base_pass import BaseOptimizationPass
+from graph_optimizer.core.torch.torch_passes import TorchBasePass
 from graph_optimizer.core.passes import PassRegistry
 
 
@@ -76,22 +76,18 @@ def _get_constant_tensor(
     return None
 
 
-@PassRegistry.register("torch_matmul_fuse", opt_level=2, priority=25)
-class MatmulFusePass(BaseOptimizationPass):
+@PassRegistry.register("torch_matmul_fuse", backend='torch', opt_level=2, priority=25)
+class MatmulFusePass(TorchBasePass):
     """
     Fuses ``matmul(matmul(x, A), B)`` into ``matmul(x, A @ B)``
     when A and B are constant weight tensors.
     """
 
-    @property
-    def name(self) -> str:
-        return self._name
-
     def __init__(self):
-        self._name = "matmul_fuse"
+        super().__init__(name="matmul_fuse")
         self._counter = 0
 
-    def apply(self, graph_module: fx.GraphModule) -> bool:
+    def transform(self, graph_module: fx.GraphModule) -> bool:
         """
         Scan the graph for fusable matmul chains.
 

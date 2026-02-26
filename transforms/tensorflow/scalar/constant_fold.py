@@ -41,42 +41,123 @@ Relationships:
 from __future__ import annotations
 
 import numpy as np
+import logging as py_logging
+from tensorflow.python.framework import tensor_util
+from tensorflow.core.framework import types_pb2
 from graph_optimizer.core import PassRegistry
 from graph_optimizer.core.tensorflow import (
     PatternRewritePass,
     Any,
     RewriteResult,
 )
-from graph_optimizer.utils.graph_utils import create_const_node
+from graph_optimizer.utils.tf.graph_utils import create_const_node
 
 
-@PassRegistry.register("constant_fold", opt_level=1, priority=5)
+@PassRegistry.register("constant_fold", backend="tensorflow", opt_level=1, priority=5)
 class ConstantFoldPass(PatternRewritePass):
     """
     Performs constant folding on eligible operation nodes.
     """
+
+    # Map TF DT enum to numpy dtype
+    TF_TO_NP = {
+        types_pb2.DT_FLOAT: np.float32,
+        types_pb2.DT_DOUBLE: np.float64,
+        types_pb2.DT_INT32: np.int32,
+        types_pb2.DT_INT64: np.int64,
+        types_pb2.DT_BOOL: np.bool_,
+        types_pb2.DT_UINT8: np.uint8,
+        types_pb2.DT_INT16: np.int16,
+        types_pb2.DT_INT8: np.int8,
+    }
 
     def __init__(self):
         # Matches any operation with all inputs as Const
         pattern = Any(alias="op")
         super().__init__(pattern, self._rewrite_constant_op, name="ConstantFold")
 
+        # Define supported ops mapping
+        self._ops_map = {
+            "Add": np.add,
+            "Mul": np.multiply,
+            "Sub": np.subtract,
+            "Div": self._safe_div,
+            "RealDiv": self._safe_div,
+            "FloorDiv": self._safe_floor_div,
+            "FloorMod": self._safe_mod,
+            "Maximum": np.maximum,
+            "Minimum": np.minimum,
+            "Neg": np.negative,
+            "Equal": np.equal,
+            "NotEqual": np.not_equal,
+            "Less": np.less,
+            "Greater": np.greater,
+            "LessEqual": np.less_equal,
+            "GreaterEqual": np.greater_equal,
+            "LogicalAnd": np.logical_and,
+            "LogicalOr": np.logical_or,
+            "LogicalNot": np.logical_not,
+            "BitwiseAnd": np.bitwise_and,
+            "BitwiseOr": np.bitwise_or,
+            "BitwiseXor": np.bitwise_xor,
+            "Abs": np.abs,
+            "Exp": np.exp,
+            "Expm1": np.expm1,
+            "Log": self._safe_log,
+            "Log1p": np.log1p,
+            "Sqrt": self._safe_sqrt,
+            "Pow": np.power,
+            "Rsqrt": self._safe_rsqrt,
+            "Square": np.square,
+            "Sin": np.sin,
+            "Cos": np.cos,
+            "Tan": np.tan,
+            "Asin": np.arcsin,
+            "Acos": np.arccos,
+            "Atan": np.arctan,
+            "Atan2": np.arctan2,
+            "Floor": np.floor,
+            "Ceil": np.ceil,
+            "Round": np.round,
+            "Sign": np.sign,
+        }
+
+    @staticmethod
+    def _safe_div(x, y):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.divide(x, y)
+
+    @staticmethod
+    def _safe_floor_div(x, y):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.floor_divide(x, y)
+
+    @staticmethod
+    def _safe_mod(x, y):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.mod(x, y)
+
+    @staticmethod
+    def _safe_log(x):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.log(x)
+
+    @staticmethod
+    def _safe_sqrt(x):
+        with np.errstate(invalid="ignore"):
+            return np.sqrt(x)
+
+    @staticmethod
+    def _safe_rsqrt(x):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return 1.0 / np.sqrt(x)
+
     def _is_all_const(self, inputs, optimizer):
-        """Check if all inputs are Const nodes.
-
-        Args:
-            inputs: List of input node names (strings)
-            optimizer: TFGraphOptimizer instance to lookup nodes
-        """
-
         for inp_name in inputs:
             if inp_name not in optimizer.nodes:
                 return False
             inp_node = optimizer.nodes[inp_name]
-            if inp_node.op != "Const":
-                return False
-            # Check if value attribute exists (basic check)
-            if "value" not in inp_node.attr:
+            if inp_node.op != "Const" or "value" not in inp_node.attr:
                 return False
         return True
 
@@ -86,16 +167,10 @@ class ConstantFoldPass(PatternRewritePass):
             return None
 
         inputs = list(op_node.input)
-        if not inputs:
-            return None
-
-        if not self._is_all_const(inputs, optimizer):
+        if not inputs or not self._is_all_const(inputs, optimizer):
             return None
 
         try:
-            from tensorflow.python.framework import tensor_util
-
-            # Extract arrays and their dtypes
             arrays = []
             input_dtypes = []
             for inp_name in inputs:
@@ -103,247 +178,45 @@ class ConstantFoldPass(PatternRewritePass):
                 value_attr = inp.attr.get("value", None)
                 if value_attr is None or not value_attr.HasField("tensor"):
                     return None
-                tensor = value_attr.tensor
-                arr = tensor_util.MakeNdarray(tensor)
+                arr = tensor_util.MakeNdarray(value_attr.tensor)
                 arrays.append(arr)
                 input_dtypes.append(arr.dtype)
 
-            # Determine result dtype using numpy promotion rules
-            try:
-                if len(input_dtypes) > 1:
-                    res_dtype = np.result_type(*input_dtypes)
-                elif len(input_dtypes) == 1:
-                    res_dtype = input_dtypes[0]
-                else:
-                    return None
-            except Exception:
-                res_dtype = input_dtypes[0]
-
+            res_dtype = (
+                np.result_type(*input_dtypes)
+                if len(input_dtypes) > 1
+                else input_dtypes[0]
+            )
             op_type = op_node.op
-
-            # Define supported ops
-            def _add(x, y):
-                return np.add(x, y)
-
-            def _mul(x, y):
-                return np.multiply(x, y)
-
-            def _sub(x, y):
-                return np.subtract(x, y)
-
-            def _div(x, y):
-                # Safety: check for division by zero to avoid inf/nan nodes
-                # If we want to allow them, we could just let numpy handle it.
-                # But usually it's safer to avoid folding into Inf/NaN if it might crash later.
-                # However, for robustness, maybe we should allow it if numpy does.
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    res = np.divide(x, y)
-                return res
-
-            def _floor_div(x, y):
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    return np.floor_divide(x, y)
-
-            def _floor_mod(x, y):
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    return np.mod(x, y)
-
-            def _maximum(x, y):
-                return np.maximum(x, y)
-
-            def _minimum(x, y):
-                return np.minimum(x, y)
-
-            def _neg(x):
-                return np.negative(x)
-
-            def _equal(x, y):
-                return np.equal(x, y)
-
-            def _not_equal(x, y):
-                return np.not_equal(x, y)
-
-            def _less(x, y):
-                return np.less(x, y)
-
-            def _greater(x, y):
-                return np.greater(x, y)
-
-            def _less_equal(x, y):
-                return np.less_equal(x, y)
-
-            def _greater_equal(x, y):
-                return np.greater_equal(x, y)
-
-            def _logical_and(x, y):
-                return np.logical_and(x, y)
-
-            def _logical_or(x, y):
-                return np.logical_or(x, y)
-
-            def _logical_not(x):
-                return np.logical_not(x)
-
-            def _bitwise_and(x, y):
-                return np.bitwise_and(x.astype(np.int64), y.astype(np.int64))
-
-            def _bitwise_or(x, y):
-                return np.bitwise_or(x.astype(np.int64), y.astype(np.int64))
-
-            def _bitwise_xor(x, y):
-                return np.bitwise_xor(x.astype(np.int64), y.astype(np.int64))
-
-            def _abs(x):
-                return np.abs(x)
-
-            def _exp(x):
-                return np.exp(x)
-
-            def _expm1(x):
-                return np.expm1(x)
-
-            def _log(x):
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    return np.log(x)
-
-            def _log1p(x):
-                return np.log1p(x)
-
-            def _sqrt(x):
-                with np.errstate(invalid="ignore"):
-                    return np.sqrt(x)
-
-            def _pow(x, y):
-                return np.power(x, y)
-
-            def _rsqrt(x):
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    return 1.0 / np.sqrt(x)
-
-            def _square(x):
-                return np.square(x)
-
-            def _sin(x):
-                return np.sin(x)
-
-            def _cos(x):
-                return np.cos(x)
-
-            def _tan(x):
-                return np.tan(x)
-
-            def _asin(x):
-                return np.arcsin(x)
-
-            def _acos(x):
-                return np.arccos(x)
-
-            def _atan(x):
-                return np.arctan(x)
-
-            def _atan2(y, x):
-                return np.arctan2(y, x)
-
-            def _floor(x):
-                return np.floor(x)
-
-            def _ceil(x):
-                return np.ceil(x)
-
-            def _round(x):
-                return np.round(x)
-
-            def _sign(x):
-                return np.sign(x)
-
-            def _reshape(x, shape):
-                return np.reshape(x, shape)
-
-            def _transpose(x, axes):
-                return np.transpose(x, axes)
-
-            def _concatenate(x_list, axis=0):
-                return np.concatenate(x_list, axis=axis)
-
-            def _select(cond, x, y):
-                return np.where(cond, x, y)
-
-            ops_map = {
-                "Add": lambda: _add(*arrays[:2]),
-                "Mul": lambda: _mul(*arrays[:2]),
-                "Sub": lambda: _sub(*arrays[:2]),
-                "Div": lambda: _div(*arrays[:2]),
-                "RealDiv": lambda: _div(*arrays[:2]),
-                "FloorDiv": lambda: _floor_div(*arrays[:2]),
-                "FloorMod": lambda: _floor_mod(*arrays[:2]),
-                "Maximum": lambda: _maximum(*arrays[:2]),
-                "Minimum": lambda: _minimum(*arrays[:2]),
-                "Neg": lambda: _neg(arrays[0]),
-                "Equal": lambda: _equal(*arrays[:2]),
-                "NotEqual": lambda: _not_equal(*arrays[:2]),
-                "Less": lambda: _less(*arrays[:2]),
-                "Greater": lambda: _greater(*arrays[:2]),
-                "LessEqual": lambda: _less_equal(*arrays[:2]),
-                "GreaterEqual": lambda: _greater_equal(*arrays[:2]),
-                "LogicalAnd": lambda: _logical_and(*arrays[:2]),
-                "LogicalOr": lambda: _logical_or(*arrays[:2]),
-                "LogicalNot": lambda: _logical_not(arrays[0]),
-                "BitwiseAnd": lambda: _bitwise_and(*arrays[:2]),
-                "BitwiseOr": lambda: _bitwise_or(*arrays[:2]),
-                "BitwiseXor": lambda: _bitwise_xor(*arrays[:2]),
-                "Abs": lambda: _abs(arrays[0]),
-                "Exp": lambda: _exp(arrays[0]),
-                "Expm1": lambda: _expm1(arrays[0]),
-                "Log": lambda: _log(arrays[0]),
-                "Log1p": lambda: _log1p(arrays[0]),
-                "Sqrt": lambda: _sqrt(arrays[0]),
-                "Pow": lambda: _pow(*arrays[:2]),
-                "Rsqrt": lambda: _rsqrt(arrays[0]),
-                "Square": lambda: _square(arrays[0]),
-                "Sin": lambda: _sin(arrays[0]),
-                "Cos": lambda: _cos(arrays[0]),
-                "Tan": lambda: _tan(arrays[0]),
-                "Asin": lambda: _asin(arrays[0]),
-                "Acos": lambda: _acos(arrays[0]),
-                "Atan": lambda: _atan(arrays[0]),
-                "Atan2": lambda: _atan2(*arrays[:2]),
-                "Floor": lambda: _floor(arrays[0]),
-                "Ceil": lambda: _ceil(arrays[0]),
-                "Round": lambda: _round(arrays[0]),
-                "Sign": lambda: _sign(arrays[0]),
-            }
 
             # Handle special cases requiring extra attrs
             if op_type == "Reshape":
                 shape_arr = arrays[1]
                 if shape_arr.ndim != 1:
                     return None
-                result = _reshape(arrays[0], tuple(shape_arr.astype(int)))
+                result = np.reshape(arrays[0], tuple(shape_arr.astype(int)))
             elif op_type == "Transpose":
                 axes_arr = arrays[1]
                 if axes_arr.ndim != 1:
                     return None
-                result = _transpose(arrays[0], tuple(axes_arr.astype(int)))
+                result = np.transpose(arrays[0], tuple(axes_arr.astype(int)))
             elif op_type == "ConcatV2":
                 axis_val = int(arrays[-1])
-                result = _concatenate(arrays[:-1], axis=axis_val)
+                result = np.concatenate(arrays[:-1], axis=axis_val)
             elif op_type == "Select":
-                result = _select(*arrays[:3])
+                result = np.where(arrays[0], arrays[1], arrays[2])
             elif op_type == "Cast":
-                # Cast to target dtype
-                dst_t_attr = op_node.attr.get("DstT", None)
-                if dst_t_attr is None:
+                dst_t_attr = op_node.attr.get("DstT")
+                if not dst_t_attr or dst_t_attr.type not in self.TF_TO_NP:
                     return None
-                dst_dtype = np.dtype(dst_t_attr.type)
-                result = arrays[0].astype(dst_dtype)
+                result = arrays[0].astype(self.TF_TO_NP[dst_t_attr.type])
+            elif op_type in self._ops_map:
+                f = self._ops_map[op_type]
+                result = f(*arrays[:2]) if len(arrays) >= 2 else f(arrays[0])
             else:
-                if op_type in ops_map:
-                    result = ops_map[op_type]()
-                else:
-                    return None
+                return None
 
-            # Ensure result has the expected promoted dtype if necessary
-            # For some ops like Equal, the result is always bool, we don't force res_dtype.
+            # Promote dtype if necessary
             if op_type not in (
                 "Equal",
                 "NotEqual",
@@ -354,6 +227,7 @@ class ConstantFoldPass(PatternRewritePass):
                 "LogicalAnd",
                 "LogicalOr",
                 "LogicalNot",
+                "Cast",
             ):
                 if result.dtype != res_dtype:
                     result = result.astype(res_dtype)
@@ -368,7 +242,5 @@ class ConstantFoldPass(PatternRewritePass):
                 new_nodes=[new_const], node_mapping={op_node.name: new_const.name}
             )
         except Exception as e:
-            import logging as py_logging
-
             py_logging.error(f"Error folding {op_node.name}: {e}")
             return None

@@ -15,7 +15,7 @@ from .pattern import (
     ConstValue,
 )
 from .matcher import MatchContext, RewriteResult, PatternMatcher
-from .passes import BasePass, PatternRewritePass
+from .tf_passes import TFBasePass, PatternRewritePass
 from .tf_optimizer import TFGraphOptimizer
 
 __all__ = [

@@ -11,7 +11,7 @@ from graph_optimizer.core.tensorflow import (
     Op,
     RewriteResult,
 )
-from graph_optimizer.utils import create_node
+from graph_optimizer.utils.tf.graph_utils import create_node
 
 tf.disable_v2_behavior()
 

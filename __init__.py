@@ -13,7 +13,7 @@ from .core.tensorflow import (
     Attr,
     Shape,
 )
-from .utils import (
+from .utils.tf.graph_utils import (
     create_node,
     load_graph,
     save_graph,

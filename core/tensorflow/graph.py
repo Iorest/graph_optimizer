@@ -1,8 +1,8 @@
 import tensorflow.compat.v1 as tf
 from typing import Dict, Set
 
-from ...utils.logger import logger as logging
-from ...utils.graph_utils import (
+from ...utils.logger import tf_logger as logging
+from ...utils.tf.graph_utils import (
     canonicalize_axis,
     build_consumer_index,
     compute_reference_counts,

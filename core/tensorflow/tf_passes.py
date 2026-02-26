@@ -1,14 +1,14 @@
 import tensorflow.compat.v1 as tf
 from typing import TYPE_CHECKING
 from ...utils.logger import trace_transformation
-from ..base_pass import BaseOptimizationPass
+from ..passes import BaseOptimizationPass
 from ..passes import OptimizationContext
 
 if TYPE_CHECKING:
     from .tf_optimizer import TFGraphOptimizer
 
 
-class BasePass(BaseOptimizationPass):
+class TFBasePass(BaseOptimizationPass):
     """Base class for all TensorFlow graph optimization passes."""
 
     @property
@@ -101,18 +101,12 @@ class BasePass(BaseOptimizationPass):
         self._node_counters.clear()
         self._node_cache.clear()
 
-    @staticmethod
-    def clean_input_name(input_name):
-        from ...utils.graph_utils import extract_base_name
-
-        return extract_base_name(input_name)
-
     def get_or_create_cached_node(
         self, op_type, inputs, attrs, root_node_name, context_desc="", create_func=None
     ):
         """Return an existing cached node or create a new one to avoid duplicate nodes within a pass."""
-        from ...utils import create_node
-        from ...utils.logger import logger as logging
+        from ...utils.tf.graph_utils import create_node
+        from ...utils.logger import tf_logger as logging
 
         inputs_tuple = tuple(inputs)
         attrs_tuple = tuple(
@@ -226,7 +220,7 @@ class BasePass(BaseOptimizationPass):
         """Save debug graph if debug_dir and step are provided."""
         if debug_dir and step is not None:
             import os
-            from ...utils import save_graph
+            from ...utils.tf.graph_utils import save_graph
 
             if isinstance(step, int):
                 filename = f"{step:02d}_{self.name}.pb"
@@ -247,7 +241,7 @@ class BasePass(BaseOptimizationPass):
         )
 
 
-class PatternRewritePass(BasePass):
+class PatternRewritePass(TFBasePass):
     """
     A pass that applies a pattern-matching-based rewrite.
     """
@@ -269,7 +263,6 @@ class PatternRewritePass(BasePass):
 
         new_graph_def, changes = optimizer.match_patterns_once(
             pass_name=self.name,
-            auto_cleanup=auto_cleanup,
             protected_nodes=protected_nodes,
         )
 

@@ -10,7 +10,7 @@ import pytest
 import tensorflow.compat.v1 as tf
 from tensorflow.core.framework import attr_value_pb2
 
-from graph_optimizer.utils.graph_utils import (
+from graph_optimizer.utils.tf.graph_utils import (
     create_node,
     create_const_node,
     extract_base_name,
@@ -23,7 +23,7 @@ from graph_optimizer.utils.graph_utils import (
     remove_nodes,
     make_output_shapes_attr,
 )
-from graph_optimizer.utils.visualization import graph_to_mermaid, graph_to_dot
+from graph_optimizer.utils.tf.visualization import graph_to_mermaid, graph_to_dot
 
 tf.disable_v2_behavior()
 

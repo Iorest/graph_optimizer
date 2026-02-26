@@ -9,10 +9,10 @@ import json
 import os
 import pytest
 import tensorflow.compat.v1 as tf
-from graph_optimizer.core.tensorflow import BasePass
+from graph_optimizer.core.tensorflow import TFBasePass
 from graph_optimizer.core import PassRegistry
 from graph_optimizer.runner import OptimizationPipeline
-from graph_optimizer.utils.graph_utils import create_node, create_const_node
+from graph_optimizer.utils.tf.graph_utils import create_node, create_const_node
 from graph_optimizer.utils.reporting import OptimizationReport
 
 tf.disable_v2_behavior()
@@ -23,14 +23,14 @@ tf.disable_v2_behavior()
 # ---------------------------------------------------------------------------
 
 
-class MockFailingPass(BasePass):
+class MockFailingPass(TFBasePass):
     def transform(self, optimizer, step=None, debug_dir=None, **kwargs):
         optimizer.graph_def.node.extend([tf.NodeDef(name="BAD_NODE", op="NoOp")])
         optimizer.load_state(optimizer.graph_def)
         raise RuntimeError("Fail")
 
 
-class MockSuccessPass(BasePass):
+class MockSuccessPass(TFBasePass):
     def transform(self, optimizer, step=None, debug_dir=None, **kwargs):
         optimizer.graph_def.node.extend([tf.NodeDef(name="GOOD_NODE", op="NoOp")])
         optimizer.load_state(optimizer.graph_def)

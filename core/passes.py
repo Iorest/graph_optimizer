@@ -1,6 +1,8 @@
 import time
-from typing import Dict, Set, Optional
-from ..utils.logger import logger as logging
+from abc import ABC, abstractmethod
+from typing import Any, Dict, Set, Optional
+
+from ..utils.logger import core_logger as logging
 
 
 class OptimizationContext:
@@ -215,12 +217,16 @@ class PassRegistry:
     _pass_metadata = {}
 
     @classmethod
-    def register(cls, name, opt_level=1, priority=100):
-        """Decorator to register a pass class with an optimization level and priority."""
+    def register(cls, name, backend="tensorflow", opt_level=1, priority=100):
+        """Decorator to register a pass class with a backend, optimization level and priority."""
 
         def decorator(pass_cls):
             cls._registered_passes[name] = pass_cls
-            cls._pass_metadata[name] = {"opt_level": opt_level, "priority": priority}
+            cls._pass_metadata[name] = {
+                "backend": backend,
+                "opt_level": opt_level,
+                "priority": priority,
+            }
             return pass_cls
 
         return decorator
@@ -252,3 +258,44 @@ class PassRegistry:
             if meta["opt_level"] <= level
         ]
         return cls.sort_passes(candidates)
+
+    @classmethod
+    def get_passes_by_backend(cls, backend, level):
+        """Returns passes for a specific backend at the given optimization level."""
+        candidates = [
+            name
+            for name, meta in cls._pass_metadata.items()
+            if meta["opt_level"] <= level and meta["backend"] in (backend, "any")
+        ]
+        return cls.sort_passes(candidates)
+
+
+class BaseOptimizationPass(ABC):
+    """
+    Abstract base class for graph optimization passes across different frameworks.
+
+    Subclasses must implement:
+    - `name`: human-readable name of the pass (e.g., "constant_fold")
+    - `apply(graph)`: apply the pass to a framework-specific graph and return True if changes were made
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Human-readable name of the pass."""
+        pass
+
+    @abstractmethod
+    def apply(self, optimizer: Any) -> bool:
+        """
+        Apply this optimization pass using the given optimizer context.
+
+        Args:
+            optimizer: A framework-specific optimizer object.
+                       For TensorFlow: TFGraphOptimizer
+                       For PyTorch FX: TorchOptimizer
+
+        Returns:
+            True if the graph was modified, False if it converged unchanged.
+        """
+        pass

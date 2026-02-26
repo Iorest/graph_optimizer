@@ -84,7 +84,7 @@ class SubgraphBuilder:
         return self.nodes
 
 
-def create_const_node(name: str, value, dtype: str, shape: list = None):
+def create_const_node(name: str, value, dtype, shape: list = None):
     """Creates a Const NodeDef with given value, dtype and shape."""
     dtype_map = {
         "float32": types_pb2.DT_FLOAT,
@@ -92,10 +92,33 @@ def create_const_node(name: str, value, dtype: str, shape: list = None):
         "int32": types_pb2.DT_INT32,
         "int64": types_pb2.DT_INT64,
         "bool": types_pb2.DT_BOOL,
+        "uint8": types_pb2.DT_UINT8,
+        "int16": types_pb2.DT_INT16,
+        "int8": types_pb2.DT_INT8,
     }
-    tf_dtype = dtype_map.get(dtype, types_pb2.DT_FLOAT)
+    # Reverse map for mapping integer enums to numpy dtypes
+    tf_to_dtype_str = {v: k for k, v in dtype_map.items()}
 
-    np_array = np.array(value, dtype=np.dtype(dtype))
+    # If it's a numpy dtype or similar object, use its name
+    if hasattr(dtype, "name"):
+        dtype_str = dtype.name
+    elif isinstance(dtype, str):
+        dtype_str = dtype
+    else:
+        dtype_str = None
+
+    if isinstance(dtype, int):
+        tf_dtype = dtype
+        dtype_str = tf_to_dtype_str.get(tf_dtype, "float32")
+    else:
+        # Normalize common string variants
+        lookup_str = dtype_str.lower() if dtype_str else ""
+        if lookup_str.startswith("dt_"):
+            lookup_str = lookup_str[3:]
+
+        tf_dtype = dtype_map.get(lookup_str, types_pb2.DT_FLOAT)
+
+    np_array = np.array(value, dtype=np.dtype(dtype_str))
     attr = attr_value_pb2.AttrValue()
     tensor = tensor_util.make_tensor_proto(np_array, dtype=tf_dtype, shape=shape)
     attr.tensor.CopyFrom(tensor)
@@ -178,10 +201,6 @@ def extract_base_name(input_name: str) -> str:
         'node' -> 'node'
     """
     return input_name.split(":")[0].lstrip("^")
-
-
-# Alias for backward compatibility
-clean_input_name = extract_base_name
 
 
 def canonicalize_axis(axis: Optional[int], rank: Optional[int]) -> Optional[int]:
@@ -358,7 +377,7 @@ def prune_dead_nodes(
     if dead_nodes:
         if logger:
             logger.info(
-                f"[{pass_name or 'optimize'}] Pruning {len(dead_nodes)} dead nodes"
+                f"[{pass_name or 'optimize'}] Pruning {len(dead_nodes)} dead nodes: {dead_nodes}"
             )
         return remove_nodes(
             graph_def, dead_nodes, pass_name, "dead node (ref_count=0)", logger

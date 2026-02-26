@@ -115,9 +115,9 @@ Relationships:
 """
 
 from collections import defaultdict
-from ....utils.logger import logger as logging
+from ....utils.logger import tf_logger as logging
 from ....core import PassRegistry
-from ....core.tensorflow import BasePass
+from ....core.tensorflow import TFBasePass
 
 
 def extract_key_attrs(attrs, op_type=None):
@@ -352,16 +352,22 @@ def apply_deduplication_map(optimizer, dedup_map, pass_name="CSE"):
                 f"[{pass_name}] Deleted: {node_name}, reason: duplicate of {canonical}"
             )
 
-    new_nodes = [n for n in optimizer.graph_def.node if n.name not in removed_nodes]
-    del optimizer.graph_def.node[:]
-    optimizer.graph_def.node.extend(new_nodes)
+    import tensorflow.compat.v1 as tf
 
-    # Refresh optimizer state after in-place modification
-    optimizer.refresh_state()
+    new_graph_def = tf.GraphDef()
+    new_graph_def.library.CopyFrom(optimizer.graph_def.library)
+    new_graph_def.versions.CopyFrom(optimizer.graph_def.versions)
+
+    for n in optimizer.graph_def.node:
+        if n.name not in removed_nodes:
+            new_graph_def.node.add().CopyFrom(n)
+
+    # Atomically replace the optimizer's graph via load_state (safe ownership transfer)
+    optimizer.load_state(new_graph_def)
 
 
-@PassRegistry.register("cse", opt_level=1, priority=20)
-class CSEPass(BasePass):
+@PassRegistry.register("cse", backend="tensorflow", opt_level=1, priority=20)
+class CSEPass(TFBasePass):
     """
     Common Subexpression Elimination Pass.
 

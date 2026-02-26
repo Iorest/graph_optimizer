@@ -5,7 +5,7 @@ import pytest
 import tensorflow.compat.v1 as tf
 from tensorflow.python.framework import tensor_util
 from graph_optimizer.transforms.tensorflow.scalar.constant_fold import ConstantFoldPass
-from graph_optimizer.utils.graph_utils import create_node, create_const_node
+from graph_optimizer.utils.tf.graph_utils import create_node, create_const_node
 from ..conftest import make_graph
 
 # ---------------------------------------------------------------------------

@@ -32,8 +32,8 @@ from ....core.tensorflow import (
     Variadic,
     get_attr_value,
 )
-from ....utils import create_node
-from ....utils.logger import logger as logging
+from ....utils.tf.graph_utils import create_node
+from ....utils.logger import tf_logger as logging
 from tensorflow.core.framework import attr_value_pb2, types_pb2
 import tensorflow.compat.v1 as tf
 from typing import Dict, List, Set, Optional
@@ -524,7 +524,7 @@ def get_dtype_from_node(optimizer, node_name: str):
 # ============================================================================
 
 
-@PassRegistry.register("pack_vectorize", opt_level=3, priority=50)
+@PassRegistry.register("pack_vectorize", backend='tensorflow', opt_level=3, priority=50)
 class PackVectorizePass(PatternRewritePass):
     """
     Pack 上浮优化 Pass。

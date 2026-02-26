@@ -1,6 +1,11 @@
-from .passes import OptimizationContext, PassRegistry
+__all__ = [
+    "BaseOptimizer",
+    "BaseOptimizationPass",
+    "OptimizationContext",
+    "PassRegistry",
+]
 from .base_optimizer import BaseOptimizer
-from .base_pass import BaseOptimizationPass
+from .passes import BaseOptimizationPass, OptimizationContext, PassRegistry
 
 __all__ = [
     "OptimizationContext",

@@ -2,7 +2,7 @@ import tensorflow.compat.v1 as tf
 import collections
 from typing import Dict, List, Optional, Any as AnyType, Tuple, TYPE_CHECKING
 
-from ...utils.logger import logger as logging
+from ...utils.logger import tf_logger as logging
 
 if TYPE_CHECKING:
     from .tf_optimizer import TFGraphOptimizer
@@ -175,7 +175,7 @@ class PatternMatcher:
                 new_nodes.append(node)
 
         if not modified:
-            return optimizer.graph_def, 0
+            return optimizer.graph_def.node, 0
 
         # Log newly added nodes
         for node_name, node_op in added_node_names:
@@ -185,24 +185,16 @@ class PatternMatcher:
             new_nodes, global_node_mapping, hoisted_controls_map, optimizer
         )
 
-        # Build new graph
-        new_graph_def = tf.GraphDef()
-        new_graph_def.node.extend(new_nodes)
-
-        if auto_cleanup:
-            new_graph_def = optimizer.prune_dead_nodes(
-                new_graph_def, pass_name, refs_before, protected_nodes
-            )
-
+        # Return the raw node list. The optimizer will rebuild the GraphDef.
         # Log iteration summary
-        nodes_after = len(new_graph_def.node)
-        node_diff = nodes_before - nodes_after
+        modes_after = len(new_nodes)
+        node_diff = nodes_before - modes_after
         logging.info(
-            f"{prefix}Summary: {nodes_before} -> {nodes_after} nodes "
+            f"{prefix}Summary: {nodes_before} -> {modes_after} nodes "
             f"(replaced: {len(replaced_node_names)}, added: {len(added_node_names)}, diff: -{node_diff})"
         )
 
-        return new_graph_def, len(replaced_node_names)
+        return new_nodes, len(replaced_node_names)
 
     def _process_match_result(
         self,
@@ -310,7 +302,7 @@ class PatternMatcher:
             f"Applying node mapping and control hoisting: "
             f"{len(global_node_mapping)} remappings, {len(hoisted_controls_map)} hoisted"
         )
-        from graph_optimizer.utils.graph_utils import extract_base_name
+        from graph_optimizer.utils.tf.graph_utils import extract_base_name
 
         for node in new_nodes:
             node_hoisted = set()
