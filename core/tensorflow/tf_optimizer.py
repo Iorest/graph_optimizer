@@ -180,6 +180,7 @@ class TFGraphOptimizer(GraphState, BaseOptimizer):
             backup_graph.CopyFrom(self.graph_def)
 
             try:
+                self.clear_transformations()
                 pass_instance.transform(
                     self,
                     step=None,

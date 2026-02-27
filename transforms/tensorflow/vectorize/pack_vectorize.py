@@ -32,7 +32,16 @@ from ....core.tensorflow import (
     Variadic,
     get_attr_value,
 )
-from ....utils.tf.graph_utils import create_node
+from ....utils.tf.graph_utils import (
+    create_node,
+    create_const_node,
+    extract_base_name,
+    get_node_dtype,
+    make_int_attr,
+    make_type_attr,
+    make_tensor_attr,
+    make_output_shapes_attr,
+)
 from ....utils.logger import tf_logger as logging
 from tensorflow.core.framework import attr_value_pb2, types_pb2
 import tensorflow.compat.v1 as tf
@@ -41,12 +50,12 @@ from enum import Enum, auto
 
 
 # ============================================================================
-# Op 配置：定义每种 Op 的穿透规则
+# Op Configuration: Definitions for Op penetration rules
 # ============================================================================
 
 
 class InputStrategy(Enum):
-    """输入处理策略"""
+    """Input processing strategy"""
 
     PACK = auto()  # 主输入：总是 Pack
     BROADCAST = auto()  # 其他输入：共享时直接 broadcast
@@ -56,7 +65,7 @@ class InputStrategy(Enum):
 
 
 class OpCategory(Enum):
-    """Op 类别"""
+    """Op category"""
 
     UNARY_ELEMENTWISE = auto()  # 一元逐元素：Relu, Sigmoid 等
     BINARY_ELEMENTWISE = auto()  # 二元逐元素：Add, Mul 等
@@ -112,12 +121,12 @@ class OpHoistConfig:
 
 
 # ============================================================================
-# Op 配置注册表
+# Op Configuration Registry
 # ============================================================================
 
 
 def _create_unary_config(op_type: str) -> OpHoistConfig:
-    """创建一元逐元素操作配置"""
+    """Creates configuration for unary elementwise operations"""
     return OpHoistConfig(
         op_type=op_type,
         category=OpCategory.UNARY_ELEMENTWISE,
@@ -127,7 +136,7 @@ def _create_unary_config(op_type: str) -> OpHoistConfig:
 
 
 def _create_binary_config(op_type: str) -> OpHoistConfig:
-    """创建二元逐元素操作配置"""
+    """Creates configuration for binary elementwise operations"""
     return OpHoistConfig(
         op_type=op_type,
         category=OpCategory.BINARY_ELEMENTWISE,
@@ -430,101 +439,11 @@ class HoistAnalysis:
 
 
 # ============================================================================
-# 节点创建工具
-# ============================================================================
-
-
-def make_output_shapes_attr(shapes: List[List[int]]) -> attr_value_pb2.AttrValue:
-    """创建 _output_shapes 属性"""
-    attr = attr_value_pb2.AttrValue()
-    for shape in shapes:
-        shape_proto = attr.list.shape.add()
-        for dim in shape:
-            shape_proto.dim.add().size = dim
-    return attr
-
-
-def make_int_attr(value: int) -> attr_value_pb2.AttrValue:
-    """创建整数属性"""
-    attr = attr_value_pb2.AttrValue()
-    attr.i = value
-    return attr
-
-
-def make_type_attr(dtype) -> attr_value_pb2.AttrValue:
-    """创建类型属性"""
-    attr = attr_value_pb2.AttrValue()
-    attr.type = dtype
-    return attr
-
-
-def make_tensor_attr_from_list(
-    values: List[int], dtype=types_pb2.DT_INT32
-) -> attr_value_pb2.AttrValue:
-    """从列表创建 tensor 属性"""
-    import numpy as np
-    from tensorflow.python.framework import tensor_util
-
-    attr = attr_value_pb2.AttrValue()
-    np_array = np.array(values, dtype=np.int32)
-    attr.tensor.CopyFrom(tensor_util.make_tensor_proto(np_array))
-    return attr
-
-
-def create_const_node(name: str, values: List[int], dtype=types_pb2.DT_INT32):
-    """创建常量节点（用于 Transpose 的 perm 等）"""
-
-    import numpy as np
-    from tensorflow.python.framework import tensor_util
-    from tensorflow.core.framework import node_def_pb2
-
-    node = node_def_pb2.NodeDef()
-    node.op = "Const"
-    node.name = name
-
-    # dtype 属性
-    node.attr["dtype"].type = dtype
-
-    # value 属性
-    np_array = np.array(
-        values, dtype=np.int32 if dtype == types_pb2.DT_INT32 else np.float32
-    )
-    node.attr["value"].tensor.CopyFrom(tensor_util.make_tensor_proto(np_array))
-
-    return node
-
-
-def get_dtype_from_node(optimizer, node_name: str):
-    """获取节点的数据类型"""
-    if not node_name:
-        return types_pb2.DT_FLOAT
-
-    base_name = node_name.split(":")[0].lstrip("^")
-    node = optimizer.nodes.get(base_name)
-    if not node:
-        return types_pb2.DT_FLOAT
-
-    type_attrs = ["T", "dtype", "output_type", "DstT", "SrcT", "Tparams"]
-    for attr_name in type_attrs:
-        if attr_name in node.attr:
-            dtype = node.attr[attr_name].type
-            if dtype and dtype != types_pb2.DT_INVALID:
-                return dtype
-
-    if node.op == "Const" and "value" in node.attr:
-        tensor = node.attr["value"].tensor
-        if tensor.dtype and tensor.dtype != types_pb2.DT_INVALID:
-            return tensor.dtype
-
-    return types_pb2.DT_FLOAT
-
-
-# ============================================================================
 # Pack 上浮优化器
 # ============================================================================
 
 
-@PassRegistry.register("pack_vectorize", backend='tensorflow', opt_level=3, priority=50)
+@PassRegistry.register("pack_vectorize", backend="tensorflow", opt_level=3, priority=50)
 class PackVectorizePass(PatternRewritePass):
     """
     Pack 上浮优化 Pass。
@@ -588,10 +507,6 @@ class PackVectorizePass(PatternRewritePass):
     # 工具方法
     # ========================================================================
 
-    @staticmethod
-    def _clean_input_name(name: str) -> str:
-        return name.split(":")[0].lstrip("^")
-
     # ========================================================================
     # 分析阶段
     # ========================================================================
@@ -618,7 +533,7 @@ class PackVectorizePass(PatternRewritePass):
 
         # 2. 计算 shape
         cfg = ha.config
-        main_name = self._clean_input_name(ha.branch_ops[0].input[cfg.main_input_idx])
+        main_name = extract_base_name(ha.branch_ops[0].input[cfg.main_input_idx])
         ha.main_input_shape = optimizer.get_node_shape(main_name)
         ha.effective_pack_axis = compute_effective_pack_axis(
             ha.main_input_shape, ha.pack_axis
@@ -674,7 +589,7 @@ class PackVectorizePass(PatternRewritePass):
         skip_attrs = {"name", "_class", "_device"}
 
         for inp in data_inputs:
-            name = self._clean_input_name(inp)
+            name = extract_base_name(inp)
             node = optimizer.nodes.get(name)
 
             # 基本验证
@@ -723,7 +638,7 @@ class PackVectorizePass(PatternRewritePass):
         main = InputAnalysisResult()
         main.strategy = InputStrategy.PACK
         main.nodes = [
-            self._clean_input_name(op.input[cfg.main_input_idx]) for op in ha.branch_ops
+            extract_base_name(op.input[cfg.main_input_idx]) for op in ha.branch_ops
         ]
         main.shape = ha.main_input_shape
         raw = [op.input[cfg.main_input_idx].lstrip("^") for op in ha.branch_ops]
@@ -891,7 +806,7 @@ class PackVectorizePass(PatternRewritePass):
             if idx >= len(op.input):
                 result.action = "incompatible"
                 return result
-            name = self._clean_input_name(op.input[idx])
+            name = extract_base_name(op.input[idx])
             nodes.append(name)
             shapes.append(optimizer.get_node_shape(name))
 
@@ -1049,30 +964,28 @@ class PackVectorizePass(PatternRewritePass):
     def _can_merge_packs(self, optimizer, pack_node, others, expected_inputs) -> bool:
         """检查其他消费者是否是可合并的 Pack"""
         axis = get_attr_value(pack_node.attr.get("axis")) or 0
-        expected = [self._clean_input_name(i) for i in expected_inputs]
+        expected = [extract_base_name(i) for i in expected_inputs]
         for name in others:
             node = optimizer.nodes.get(name)
             if not node or node.op != "Pack":
                 return False
             if (get_attr_value(node.attr.get("axis")) or 0) != axis:
                 return False
-            inputs = [
-                self._clean_input_name(i) for i in node.input if not i.startswith("^")
-            ]
+            inputs = [extract_base_name(i) for i in node.input if not i.startswith("^")]
             if inputs != expected:
                 return False
         return True
 
     def _check_elimination(self, optimizer, branch_ops, n_branches) -> Optional[Dict]:
         """检查 StridedSlice 消除"""
-        source = self._clean_input_name(branch_ops[0].input[0])
+        source = extract_base_name(branch_ops[0].input[0])
         for op in branch_ops[1:]:
-            if self._clean_input_name(op.input[0]) != source:
+            if extract_base_name(op.input[0]) != source:
                 return None
 
         indices, slice_axis = [], None
         for op in branch_ops:
-            begin_node = optimizer.nodes.get(self._clean_input_name(op.input[1]))
+            begin_node = optimizer.nodes.get(extract_base_name(op.input[1]))
             if not begin_node or begin_node.op != "Const":
                 return None
             begin = get_attr_value(begin_node.attr.get("value"))
@@ -1117,9 +1030,9 @@ class PackVectorizePass(PatternRewritePass):
         2. source 的 slice_axis 维度大小等于 n_branches
         3. slice_axis 从后往前数等于 pack_axis_from_end（确保消除后 shape 格式一致）
         """
-        source = self._clean_input_name(analysis.branch_ops[0].input[0])
+        source = extract_base_name(analysis.branch_ops[0].input[0])
         for op in analysis.branch_ops[1:]:
-            if self._clean_input_name(op.input[0]) != source:
+            if extract_base_name(op.input[0]) != source:
                 return None
 
         source_shape = optimizer.get_node_shape(source)
@@ -1156,7 +1069,7 @@ class PackVectorizePass(PatternRewritePass):
         new_nodes = []
         config = analysis.config
         main_info = analysis.inputs[config.main_input_idx]
-        dtype = get_dtype_from_node(optimizer, main_info.nodes[0])
+        dtype = get_node_dtype(main_info.nodes[0], nodes=optimizer.nodes)
 
         # 1. 准备主输入
         if main_info.action == "broadcast":
@@ -1243,7 +1156,7 @@ class PackVectorizePass(PatternRewritePass):
                     info.nodes,
                     pack_axis,
                     analysis.n_branches,
-                    get_dtype_from_node(optimizer, info.nodes[0]),
+                    get_node_dtype(info.nodes[0], nodes=optimizer.nodes),
                     info.pack_shape,
                     new_nodes,
                     pack_axis_from_end=analysis.pack_axis_from_end,
@@ -1256,7 +1169,7 @@ class PackVectorizePass(PatternRewritePass):
                     info.nodes,
                     pack_axis,
                     analysis.n_branches,
-                    get_dtype_from_node(optimizer, info.nodes[0]),
+                    get_node_dtype(info.nodes[0], nodes=optimizer.nodes),
                     info.pack_shape,
                     new_nodes,
                     pack_axis_from_end=analysis.pack_axis_from_end,
@@ -1267,7 +1180,7 @@ class PackVectorizePass(PatternRewritePass):
                         pack_node.name,
                         pack_output,
                         info.transpose_perm,
-                        get_dtype_from_node(optimizer, info.nodes[0]),
+                        get_node_dtype(info.nodes[0], nodes=optimizer.nodes),
                         info.pack_shape,
                         optimizer,
                         new_nodes,
@@ -1292,7 +1205,7 @@ class PackVectorizePass(PatternRewritePass):
 
                 # 创建新的常量节点
                 name = self.make_unique_node_name(pack_node.name, "AdjustedConst")
-                dtype = get_dtype_from_node(optimizer, info.nodes[0])
+                dtype = get_node_dtype(info.nodes[0], nodes=optimizer.nodes)
                 new_nodes.append(create_const_node(name, new_val, dtype))
                 other_inputs[idx] = name
             else:
@@ -1371,7 +1284,7 @@ class PackVectorizePass(PatternRewritePass):
             )
             self._hoisted_cache[cache_key] = batched_name
 
-        # 4. 如果需要，添加最终 Transpose
+        # 4. Add final Transpose if needed
         output_name = batched_name
         if analysis.needs_final_transpose:
             transpose_name = self.make_unique_node_name(pack_node.name, "Transpose")
@@ -1472,14 +1385,14 @@ class PackVectorizePass(PatternRewritePass):
                 "Const",
                 shape_name,
                 attr={
-                    "value": make_tensor_attr_from_list(target_shape),
+                    "value": make_tensor_attr(target_shape, dtype=types_pb2.DT_INT32),
                     "dtype": make_type_attr(types_pb2.DT_INT32),
                 },
             )
         )
 
         reshape_name = self.make_unique_node_name(root, "Reshape")
-        dtype = get_dtype_from_node(optimizer, input_node)
+        dtype = get_node_dtype(input_node, nodes=optimizer.nodes)
         attrs = {
             "T": make_type_attr(dtype),
             "Tshape": make_type_attr(types_pb2.DT_INT32),

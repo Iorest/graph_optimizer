@@ -9,7 +9,7 @@ and reusability.
 import os
 import collections
 import numpy as np
-from typing import Dict, Set, Optional, List
+from typing import Dict, Set, Optional, List, Any
 
 import tensorflow.compat.v1 as tf
 from tensorflow.core.framework import node_def_pb2
@@ -17,11 +17,6 @@ from tensorflow.core.framework import types_pb2
 from tensorflow.core.framework import attr_value_pb2
 from tensorflow.python.framework import tensor_util
 from google.protobuf import text_format
-
-
-# =======================
-# Graph I/O Operations
-# =======================
 
 
 def create_node(op, name, inputs=None, attr=None):
@@ -84,8 +79,11 @@ class SubgraphBuilder:
         return self.nodes
 
 
-def create_const_node(name: str, value, dtype, shape: list = None):
-    """Creates a Const NodeDef with given value, dtype and shape."""
+def create_const_node(name: str, value, dtype=None, shape: list = None):
+    """
+    Creates a Const NodeDef with given value, dtype and shape.
+    Handles scalars, lists, and numpy arrays.
+    """
     dtype_map = {
         "float32": types_pb2.DT_FLOAT,
         "float64": types_pb2.DT_DOUBLE,
@@ -99,37 +97,67 @@ def create_const_node(name: str, value, dtype, shape: list = None):
     # Reverse map for mapping integer enums to numpy dtypes
     tf_to_dtype_str = {v: k for k, v in dtype_map.items()}
 
-    # If it's a numpy dtype or similar object, use its name
-    if hasattr(dtype, "name"):
+    # Resolve dtype string
+    if dtype is None:
+        if isinstance(value, bool):
+            dtype_str = "bool"
+        elif isinstance(value, int):
+            dtype_str = "int32"
+        elif isinstance(value, float):
+            dtype_str = "float32"
+        elif hasattr(value, "dtype"):
+            dtype_str = value.dtype.name
+        else:
+            dtype_str = "float32"
+    elif hasattr(dtype, "name"):
         dtype_str = dtype.name
     elif isinstance(dtype, str):
         dtype_str = dtype
+    elif isinstance(dtype, int):
+        dtype_str = tf_to_dtype_str.get(dtype, "float32")
     else:
-        dtype_str = None
+        dtype_str = "float32"
 
-    if isinstance(dtype, int):
-        tf_dtype = dtype
-        dtype_str = tf_to_dtype_str.get(tf_dtype, "float32")
-    else:
-        # Normalize common string variants
-        lookup_str = dtype_str.lower() if dtype_str else ""
-        if lookup_str.startswith("dt_"):
-            lookup_str = lookup_str[3:]
+    # Resolve TF dtype
+    lookup_str = dtype_str.lower()
+    if lookup_str.startswith("dt_"):
+        lookup_str = lookup_str[3:]
+    tf_dtype = dtype_map.get(lookup_str, types_pb2.DT_FLOAT)
 
-        tf_dtype = dtype_map.get(lookup_str, types_pb2.DT_FLOAT)
-
+    # Create tensor proto
     np_array = np.array(value, dtype=np.dtype(dtype_str))
-    attr = attr_value_pb2.AttrValue()
     tensor = tensor_util.make_tensor_proto(np_array, dtype=tf_dtype, shape=shape)
-    attr.tensor.CopyFrom(tensor)
 
     node = node_def_pb2.NodeDef()
     node.op = "Const"
     node.name = name
-    dtype_attr = attr_value_pb2.AttrValue(type=tf_dtype)
-    node.attr["dtype"].CopyFrom(dtype_attr)
-    node.attr["value"].CopyFrom(attr)
+    node.attr["dtype"].type = tf_dtype
+    node.attr["value"].tensor.CopyFrom(tensor)
     return node
+
+
+def make_int_attr(value: int) -> attr_value_pb2.AttrValue:
+    """Creates an AttrValue with an integer value."""
+    attr = attr_value_pb2.AttrValue()
+    attr.i = value
+    return attr
+
+
+def make_type_attr(dtype) -> attr_value_pb2.AttrValue:
+    """Creates an AttrValue with a type value."""
+    attr = attr_value_pb2.AttrValue()
+    attr.type = dtype
+    return attr
+
+
+def make_tensor_attr(value, dtype=None, shape=None) -> attr_value_pb2.AttrValue:
+    """Creates an AttrValue with a tensor value."""
+    attr = attr_value_pb2.AttrValue()
+    np_array = np.array(value)
+    if dtype:
+        np_array = np_array.astype(np.dtype(dtype) if isinstance(dtype, str) else dtype)
+    attr.tensor.CopyFrom(tensor_util.make_tensor_proto(np_array, shape=shape))
+    return attr
 
 
 def make_output_shapes_attr(shapes: List[List[int]]) -> attr_value_pb2.AttrValue:
@@ -150,11 +178,6 @@ def make_output_shapes_attr(shapes: List[List[int]]) -> attr_value_pb2.AttrValue
     return attr
 
 
-# =======================
-# Graph Analysis Utilities
-# =======================
-
-
 def get_attr_value(attr_proto):
     """Unwraps a TensorFlow AttrValue proto into a Python literal."""
     if attr_proto is None:
@@ -173,15 +196,112 @@ def get_attr_value(attr_proto):
     if field == "shape":
         return [dim.size for dim in attr_proto.shape.dim]
     if field == "tensor":
-        from tensorflow.python.framework import tensor_util
-        import numpy as np
-
         t = tensor_util.MakeNdarray(attr_proto.tensor)
         if np.isscalar(t) or t.ndim == 0:
             return t.item()
         return t
     # Fallback to the proto itself for complex types
     return attr_proto
+
+
+def get_node_shape(node: tf.NodeDef) -> Optional[List[int]]:
+    """Extracts shape from a node's attributes or tensor value."""
+    if node is None:
+        return None
+    if "_output_shapes" in node.attr:
+        shapes = node.attr["_output_shapes"].list.shape
+        if shapes:
+            return [dim.size for dim in shapes[0].dim]
+    if "shape" in node.attr:
+        return [dim.size for dim in node.attr["shape"].shape.dim]
+    if node.op == "Const" and "value" in node.attr:
+        tensor = node.attr["value"].tensor
+        if tensor.HasField("tensor_shape"):
+            return [d.size for d in tensor.tensor_shape.dim]
+        # Fallback: try to get shape from actual tensor values if tensor_shape is missing
+        try:
+            return tensor_util.MakeNdarray(tensor).shape.tolist()
+        except Exception:
+            return None
+    return None
+
+
+def get_node_rank(node: tf.NodeDef) -> Optional[int]:
+    """Returns the rank (number of dimensions) of a node."""
+    shape = get_node_shape(node)
+    return len(shape) if shape is not None else None
+
+
+def get_node_dtype(
+    node_or_name: Any, nodes: Optional[Dict[str, tf.NodeDef]] = None
+) -> int:
+    """Gets the data type (enum) of a node or node name."""
+    node = None
+    if isinstance(node_or_name, str):
+        if nodes:
+            node = nodes.get(extract_base_name(node_or_name))
+    else:
+        node = node_or_name
+
+    if not node:
+        return types_pb2.DT_FLOAT
+
+    type_attrs = ["T", "dtype", "output_type", "DstT", "SrcT", "Tparams"]
+    for attr_name in type_attrs:
+        if attr_name in node.attr:
+            dtype = node.attr[attr_name].type
+            if dtype and dtype != types_pb2.DT_INVALID:
+                return dtype
+
+    if node.op == "Const" and "value" in node.attr:
+        tensor = node.attr["value"].tensor
+        if tensor.dtype and tensor.dtype != types_pb2.DT_INVALID:
+            return tensor.dtype
+
+    return types_pb2.DT_FLOAT
+
+
+def is_scalar(node: tf.NodeDef) -> bool:
+    """Returns True if the node's output is a scalar."""
+    shape = get_node_shape(node)
+    return shape == []
+
+
+def is_const(node: tf.NodeDef, value: Any) -> bool:
+    """Checks if a node is a Const with a specific value."""
+    if node is None or node.op != "Const":
+        return False
+    val = get_attr_value(node.attr.get("value"))
+    return np.all(np.equal(val, value))
+
+
+def get_broadcast_shape(
+    s1: Optional[List[int]], s2: Optional[List[int]]
+) -> Optional[List[int]]:
+    """Computes the result shape of broadcasting s1 and s2."""
+    if s1 is None or s2 is None:
+        return None
+    if s1 == s2:
+        return s1
+    if not s1:
+        return s2
+    if not s2:
+        return s1
+    len1, len2 = len(s1), len(s2)
+    max_len = max(len1, len2)
+    result = []
+    for i in range(max_len):
+        d1 = s1[len1 - 1 - i] if i < len1 else 1
+        d2 = s2[len2 - 1 - i] if i < len2 else 1
+        if d1 == d2:
+            result.append(d1)
+        elif d1 == 1:
+            result.append(d2)
+        elif d2 == 1:
+            result.append(d1)
+        else:
+            return None
+    return result[::-1]
 
 
 def extract_base_name(input_name: str) -> str:

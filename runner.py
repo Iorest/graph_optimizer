@@ -89,10 +89,6 @@ class OptimizationPipeline:
         self.debug_dir = None
         self.resolved_passes = []
 
-    # =========================================================================
-    # Fluent API (Chaining)
-    # =========================================================================
-
     def with_input(self, input_graph: str):
         """Sets input graph path."""
         self.input_graph = input_graph

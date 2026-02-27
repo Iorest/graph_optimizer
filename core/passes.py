@@ -48,10 +48,6 @@ class OptimizationContext:
         self._pass_stats: Dict[str, dict] = {}
         self._current_pass_start: Optional[float] = None
 
-    # =========================================================================
-    # Protected Nodes Management
-    # =========================================================================
-
     @property
     def protected_nodes(self) -> Set[str]:
         """Get the set of protected nodes."""
@@ -75,10 +71,6 @@ class OptimizationContext:
     def clear_protected(self):
         """Clear all protected nodes."""
         self._protected_nodes.clear()
-
-    # =========================================================================
-    # Pass & Iteration Management
-    # =========================================================================
 
     def begin_pass(self, pass_name: str):
         """Mark the beginning of a pass."""
@@ -168,10 +160,6 @@ class OptimizationContext:
         """Get current iteration number."""
         return self._current_iteration
 
-    # =========================================================================
-    # Logging Helpers
-    # =========================================================================
-
     def log_info(self, message: str):
         """Log info with current pass prefix."""
         prefix = f"[{self._current_pass}] " if self._current_pass else ""
@@ -186,10 +174,6 @@ class OptimizationContext:
         """Log warning with current pass prefix."""
         prefix = f"[{self._current_pass}] " if self._current_pass else ""
         logging.warning(f"{prefix}{message}")
-
-    # =========================================================================
-    # Statistics Access
-    # =========================================================================
 
     def get_pass_total_changes(self, pass_name: str) -> int:
         """Get total changes for a pass."""

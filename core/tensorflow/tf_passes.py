@@ -1,8 +1,10 @@
 import tensorflow.compat.v1 as tf
 from typing import TYPE_CHECKING
-from ...utils.logger import trace_transformation
+from ...utils.logger import trace_transformation, tf_logger as logging
+from ...utils.tf.graph_utils import create_node, save_graph
 from ..passes import BaseOptimizationPass
 from ..passes import OptimizationContext
+import os
 
 if TYPE_CHECKING:
     from .tf_optimizer import TFGraphOptimizer
@@ -105,8 +107,6 @@ class TFBasePass(BaseOptimizationPass):
         self, op_type, inputs, attrs, root_node_name, context_desc="", create_func=None
     ):
         """Return an existing cached node or create a new one to avoid duplicate nodes within a pass."""
-        from ...utils.tf.graph_utils import create_node
-        from ...utils.logger import tf_logger as logging
 
         inputs_tuple = tuple(inputs)
         attrs_tuple = tuple(
@@ -219,9 +219,6 @@ class TFBasePass(BaseOptimizationPass):
     def _save_debug_graph(self, graph_def, step, debug_dir):
         """Save debug graph if debug_dir and step are provided."""
         if debug_dir and step is not None:
-            import os
-            from ...utils.tf.graph_utils import save_graph
-
             if isinstance(step, int):
                 filename = f"{step:02d}_{self.name}.pb"
             else:

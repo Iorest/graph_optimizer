@@ -13,36 +13,10 @@ from ...utils.tf.graph_utils import (
     update_node_inputs,
     check_external_consumers,
     log_external_consumer_warning,
+    get_attr_value,
+    get_node_shape,
+    get_node_rank,
 )
-
-
-def get_attr_value(attr_proto):
-    """Unwraps a TensorFlow AttrValue proto into a Python literal."""
-    if attr_proto is None:
-        return None
-    field = attr_proto.WhichOneof("value")
-    if field == "s":
-        return attr_proto.s.decode("utf-8")
-    if field == "i":
-        return attr_proto.i
-    if field == "f":
-        return attr_proto.f
-    if field == "b":
-        return attr_proto.b
-    if field == "type":
-        return attr_proto.type
-    if field == "shape":
-        return [dim.size for dim in attr_proto.shape.dim]
-    if field == "tensor":
-        from tensorflow.python.framework import tensor_util
-        import numpy as np
-
-        t = tensor_util.MakeNdarray(attr_proto.tensor)
-        if np.isscalar(t) or t.ndim == 0:
-            return t.item()
-        return t
-    # Fallback to the proto itself for complex types
-    return attr_proto
 
 
 class GraphState:
@@ -80,19 +54,15 @@ class GraphState:
             if isinstance(node_or_name, str)
             else node_or_name
         )
-        if node is None:
-            return None
-        if "_output_shapes" in node.attr:
-            shapes = node.attr["_output_shapes"].list.shape
-            if shapes:
-                return [dim.size for dim in shapes[0].dim]
-        if "shape" in node.attr:
-            return [dim.size for dim in node.attr["shape"].shape.dim]
-        return None
+        return get_node_shape(node)
 
     def get_node_rank(self, node_or_name):
-        shape = self.get_node_shape(node_or_name)
-        return len(shape) if shape is not None else None
+        node = (
+            self.nodes.get(node_or_name)
+            if isinstance(node_or_name, str)
+            else node_or_name
+        )
+        return get_node_rank(node)
 
     def canonicalize_axis(self, axis, rank):
         return canonicalize_axis(axis, rank)

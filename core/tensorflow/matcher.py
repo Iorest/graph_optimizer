@@ -125,8 +125,7 @@ class PatternMatcher:
         optimizer.protected_nodes = protected_nodes
         optimizer.current_pass_name = pass_name  # Set for logging in Pattern.match
 
-        refs_before = optimizer.compute_reference_counts()
-        nodes_before = len(optimizer.graph_def.node)
+        nodes_before = len(optimizer.nodes)
         prefix = f"[{pass_name}] " if pass_name else ""
 
         new_nodes = []
@@ -155,7 +154,7 @@ class PatternMatcher:
                     rewriter_output = rewriter(match, optimizer)
                     if rewriter_output is not None:
                         result = RewriteResult.from_nodes(rewriter_output)
-                        self._process_match_result(
+                        if self._process_match_result(
                             node,
                             match,
                             result,
@@ -166,13 +165,16 @@ class PatternMatcher:
                             added_node_names,
                             global_node_mapping,
                             hoisted_controls_map,
-                        )
-                        found_match = True
-                        modified = True
+                        ):
+                            found_match = True
+                            modified = True
                         break
 
             if not found_match:
                 new_nodes.append(node)
+
+        if global_node_mapping:
+            modified = True
 
         if not modified:
             return optimizer.graph_def.node, 0
@@ -208,8 +210,18 @@ class PatternMatcher:
         added_node_names: list,
         global_node_mapping: dict,
         hoisted_controls_map: dict,
-    ):
+    ) -> bool:
         """Processes the result of a successful pattern match."""
+        # Centralized protection: ensure model outputs/protected nodes are preserved
+        is_protected = node.name in optimizer.protected_nodes
+        if is_protected:
+            swallowed = self._handle_protected_nodes(node, result, new_nodes)
+            if swallowed:
+                # Still want to update mappings so consumers use the base node!
+                if result.node_mapping:
+                    global_node_mapping.update(result.node_mapping)
+                return False
+
         self._handle_control_dependencies(node, match, result, hoisted_controls_map)
 
         # Log replaced root node
@@ -243,6 +255,8 @@ class PatternMatcher:
                 replaced_node_names.update(safe_to_replace)
             else:
                 replaced_node_names.update(result.replaced_nodes)
+
+        return True
 
     def _handle_control_dependencies(
         self,
@@ -315,3 +329,52 @@ class PatternMatcher:
             optimizer.update_node_inputs(
                 node, global_node_mapping, node_hoisted or None
             )
+
+    def _handle_protected_nodes(
+        self, node: tf.NodeDef, result: RewriteResult, new_nodes_list: list
+    ) -> bool:
+        """
+        Ensures protected nodes (e.g. outputs) preserve their identity after rewrite.
+        Returns: True if the rewrite was 'swallowed' (no change caused), False otherwise.
+        """
+        mapped_target = result.node_mapping.get(node.name)
+
+        # Case 1: Node replaced by new nodes -> the first new node must inherit the protected name
+        if result.new_nodes:
+            primary_new = result.new_nodes[0]
+            if primary_new.name != node.name:
+                # Update renaming map for subsequent nodes if necessary
+                result.node_mapping[primary_new.name] = (
+                    primary_new.name
+                )  # Identity fallback
+                primary_new.name = node.name
+                # Ensure the remapping points to this renamed node
+                result.node_mapping[node.name] = node.name
+            return False
+
+        # Case 2: Node remapped to an existing node (e.g. Identity elimination)
+        # We must insert an Identity node to preserve the protected name
+        elif mapped_target and mapped_target != node.name:
+            # Check if this node is already an Identity pointing to the same target.
+            # If so, the simplify rule matched it but we shouldn't re-inject the same identity.
+            if node.op == "Identity" and node.input and node.input[0] == mapped_target:
+                # We KEEP the mapping to help consumers, but we don't re-inject
+                # a redundant identity, nor do we count this as a change for the loop.
+                return True
+
+            from graph_optimizer.utils.tf.graph_utils import (
+                create_node,
+                make_type_attr,
+                get_node_dtype,
+            )
+
+            dtype = get_node_dtype(node)
+            attr = {"T": make_type_attr(dtype)}
+            proxy = create_node(
+                "Identity", node.name, inputs=[mapped_target], attr=attr
+            )
+            result.new_nodes.append(proxy)
+            result.node_mapping[node.name] = node.name
+            return False
+
+        return False

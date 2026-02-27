@@ -3,7 +3,6 @@ import json
 import sys
 import os
 
-# Add project root to path for direct execution
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -15,7 +14,6 @@ except ImportError:
     import graph_optimizer.transforms as transforms
     from graph_optimizer.utils.logger import core_logger as custom_logger
 
-# Prevent unused import warning
 _ = transforms
 
 
@@ -50,11 +48,9 @@ Config file format (JSON):
     "remove_passes": ["unwanted_pass"],
     "log_file": "optimization.log"
   }
-        """
+        """,
     )
-    parser.add_argument(
-        "--config", help="Path to JSON configuration file"
-    )
+    parser.add_argument("--config", help="Path to JSON configuration file")
     parser.add_argument("--input", help="Override input graph path")
     parser.add_argument("--output", help="Override output graph path")
     parser.add_argument(
@@ -96,10 +92,12 @@ Config file format (JSON):
     output_nodes = None
     if args.output_nodes:
         output_nodes = [n.strip() for n in args.output_nodes.split(",") if n.strip()]
-    
+
     protected_nodes = None
     if args.protected_nodes:
-        protected_nodes = [n.strip() for n in args.protected_nodes.split(",") if n.strip()]
+        protected_nodes = [
+            n.strip() for n in args.protected_nodes.split(",") if n.strip()
+        ]
 
     try:
         try:
@@ -108,14 +106,14 @@ Config file format (JSON):
             from graph_optimizer.runner import OptimizationPipeline
 
         pipeline = OptimizationPipeline(
-            input_graph=args.input,          # Override from command line
-            output_graph=args.output,        # Override from command line
-            level=args.level,                # Optimization level (1 or 2)
-            debug=args.debug,                # Enable debug mode
-            log_file=args.log_file,          # Log file path
-            output_nodes=output_nodes,       # Output nodes to protect
-            protected_nodes=protected_nodes, # Additional nodes to protect
-            config=config,                   # Config dict from JSON file
+            input_graph=args.input,  # Override from command line
+            output_graph=args.output,  # Override from command line
+            level=args.level,  # Optimization level (1 or 2)
+            debug=args.debug,  # Enable debug mode
+            log_file=args.log_file,  # Log file path
+            output_nodes=output_nodes,  # Output nodes to protect
+            protected_nodes=protected_nodes,  # Additional nodes to protect
+            config=config,  # Config dict from JSON file
             # Command line args take precedence over config file
         )
         pipeline.run()
